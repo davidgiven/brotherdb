@@ -1,0 +1,3893 @@
+;INCLUDES CODE FROM ANDY, JAMES, and BROTHER
+;Includes code from Z80_Assembly_Language_Subroutines_1983.pdf Leventhal Saville 
+; write the header
+
+; org 0  ; Comment this out for normal binary
+;jp emulator_vector  ; Comment this out for normal binary
+
+org 5000h
+db $8F, $c1, $01, $01, $00, $00, $42, $52
+
+FALSE:  EQU     0
+TRUE:   EQU     -1
+         .ORG   5008h   
+          JP   APL_START   
+             ; The FEEDER is a debugging / scripting tool.
+             ;At the moment it only scripts Tinybasic, change later...
+DEBUG:    EQU   TRUE   
+FEED:     EQU   FALSE   
+FEEDDEBUG:   EQU   TRUE   
+FEEDER_CHIN:   DW   SCRIPT1   
+FEEDER_TINYBASIC:   DW   SCRIPT2   
+SCRIPT1:   DB   "t\r"   
+SCRIPT2:   DB   "10 FOR N = 1 TO 10\rLIST\rGIBBERISH\r",0   
+;SOME CONSTANTS FROM NASCOM BASIC.
+;==============================================================
+
+CTRLC:    EQU    03H             ; Control "C"
+CTRLG:    EQU    07H             ; Control "G"
+BKSP:    EQU    08H             ; Back space
+BS:    EQU    08H             ; Back space
+LF:      EQU    0AH             ; Line feed
+CS:      EQU    0CH             ; Clear screen
+CR:      EQU    0DH             ; Carriage return
+CTRLO:    EQU    0FH             ; Control "O"
+CTRLQ:    EQU	11H             ; Control "Q"
+CTRLR:    EQU    12H             ; Control "R"
+CTRLS:    EQU    13H             ; Control "S"
+CTRLU:    EQU    15H             ; Control "U"
+ESC:     EQU    1BH             ; Escape
+DEL:     EQU    7FH             ; Delete
+
+;CONSTANTS from http://www.hd64180-cpm.de/resources/180MACRO.LIB
+;ASCI REGISTERS
+CNTLA0:	EQU	00H
+CNTLA1:	EQU	01H
+CNTLB0:	EQU	02H
+CNTLB1:	EQU	03H
+STAT0:	EQU	04H
+STAT1:	EQU	05H
+TDR0:	EQU	06H
+TDR1:	EQU	07H
+RDR0:	EQU	08H
+RDR1:	EQU	09H
+
+.macro in0a
+.if DEBUG = FALSE
+;    ld a,0 ;you would need this on HD64180 for in a,(00xx) page zero in
+;    in a,%%1
+    db 0EDh, 038h, %%1 ; EXTENDED INSTRUCTION HD64180 ZERO-PAGE I/O IN
+.else
+    nop ; Use this moment to supply a byte to serial input?
+    nop ; IN0 a,(port)
+.endif
+.endm
+
+.macro out0a
+.if DEBUG = FALSE
+    db 0EDh, 039h, %%1 ; EXTENDED INSTRUCTION HD64180 ZERO-PAGE I/O OUT
+.else
+    nop ; OUT0 (port),a
+.endif
+.endm
+
+.ent $   ; ENTRY POINT FOR DEBUGGING. Debug entry.
+APL_START:
+          LD   BC,0   ; GETTING THE STACK POINTER so I can restore it for exit
+          LD   H,B   
+          LD   L,B   ; HL=0 NOW
+          ADD   HL,SP   ; HERE IS THE STACK ;this method is from TINY BASIC
+          LD   (SP_STORED_ON_ENTRY),HL   
+    jp apl_code_normal_start  ; NORMAL APL entry point is first ORG ($5000)+8
+EXIT_APL:      
+          LD   HL,(SP_STORED_ON_ENTRY)   
+          LD   SP,HL   
+          RET      
+SP_STORED_ON_ENTRY:   DW   0   
+    db "EMULATOR ONLY:"
+emulator_vector:
+    ld SP,0080h  ;Initialize stack pointer for the EMULATOR.  NOT for Brother hardware.
+    call Call_Debugger
+
+    ret
+    db "NORMAL ENTRY:"
+apl_code_normal_start:
+;    ld   bc,Message
+;    call ShowMessage
+    call ConfigureSerial
+          JP   startover   
+JC_MENU:   db   "\r\nJC MENU. Single keypresses... no need for enter here.\r\n"   
+	db "o z Z c C misc tests see source\r\n"   
+	db "d=Debugger ?=inbuffer CTRL-C \r\n"   	
+	db "t=TinyBASIC D=DUMPMEM f=FILLMEM(crash)\r\n"   
+	db "i,I=I/ODUMP L=SetSerDelay R=Registers(notimp)\r\n"   
+	db "X=EXIT!/reboot.  ESC usually kills.\r\n"   
+        db "OK!\r\n"   
+        db 0   
+startover:
+okprompt:
+    ld de,buffer1  ; Get our buffer location
+    ld (bufptr1),de ; zero the pointer to the current byte
+    ld   hl,JC_Menu   
+    call   write_string  
+loopecho:
+    
+    call chin
+    ld b,a   
+    cp "o"   ; "Hello Andy" and such, system call testing.
+    JP   z,Do_Other_Testing   
+    CP   "z"   ; TEST non-HD64180 instructions for reading I/O
+    CALL   z,Test_Z80_In   ; it didn't work, dunno why
+    CP   "Z"   ; TEST non-HD64180 instructions for writing I/O
+    CALL   z,Test_Z80_Out   ; it didn't work, dunno why
+    CP   "c"   ; TEST CHKIO_SURROGATE ISSUE
+    JP   z,Test_CHKIO_SURROGATE_echo   
+    CP   "C"   ; TEST CHKIO_SURROGATE ISSUE outer function
+    JP   z,Test_CHKIO_echo   
+
+    cp 'd'
+    jp z,Call_Debugger
+    cp '?'
+    call z,printbuffer1
+    cp 3
+    jp z,startover
+    cp 't'
+    jp z,Call_TinyBasic
+    cp 'D'
+    jp z,DUMP_MEMORY
+    cp 'f'
+    jp z,FILL_MEMORY
+    cp 'i'
+    jp z,DUMP_IO0
+    cp 'I'
+    jp z,DUMP_IOxxxx 
+    cp 13
+    call z,parse1
+    cp 10
+    call z,parse1
+    cp 'L' ; Send delay length
+    jp z, SetShortDelayLength
+    cp 'R' ; Dump registers
+    jp z, DumpRegisters
+    CP   "X"   ;uppercase X to exit this .APL
+    JP   z,EXIT_APL   
+
+    ld (de),a
+    inc de ;Increment the buffer pointer
+    ld a,(de) ; Check for 255 (buffer limit)
+    cp 255
+    jr nz,notfull1
+    dec de ; if full, just back it up to the prev byte.
+    ld a,BS ; output a backspace to indicate this to the user
+    call MONOUT
+notfull1:
+    ld a,0
+    ld (de),a  ; Null-terminate the commandline.
+    ld (bufptr1),de
+
+    ld a,b ; get the char back to echo it
+    call MONOUT
+
+    jr loopecho
+
+; My variables for this little interface
+firstbyte1:    defb 0
+firstword1:  defw 0000
+secondword1: defw 0000
+state1:      defb 0
+buffer1:      defs 256
+bufend1:  defb 255
+bufptr1    defw buffer1
+addcommandlinechar: ; didn't finish this, it means nothing
+
+SetShortDelayLength: ; JC: THis is not finished... 
+ ; JC: I made it change a single byte, but the variable is a word.
+ 
+    call chin
+    cp 30
+    jr c,doneSetDelay ;error not reported, don't set delay.
+    cp 40 
+    jr c,sub30
+    sub 7 ; Turn 'A' into '0'+10 
+sub30:
+    sub 30
+    ld b,a
+    ;Multiply by 10; multiply by 8 first then add twice.
+    rlc a
+    rlc a
+    rlc a; thre rotations = times 8
+    and 0b11111000; clear the rotated low bits
+    rlc b; twice b
+    add a,b ; this should be our *10 number.  
+    ld (ShortDelay_Length+1),a
+doneSetDelay:
+    call CRLF
+    ld a,'='
+    call MONOUT
+    ld a,(ShortDelay_Length+1)
+    call puthexbyte
+    call CRLF
+    jp okprompt
+
+DumpRegisters:
+          LD   BC,0   
+          LD   H,B   
+          LD   L,B   ; HL=0 NOW
+          ADD   HL,SP   ; HERE IS THE STACK ;this method is from TINY BASIC
+parse1:
+    call CRLF
+    ld hl,buffer1
+    call write_string    
+    ; I want to move the previous single-key options to here.
+    ret
+
+printbuffer1:
+    call CRLF
+    ld hl,buffer1
+    call write_string    
+    call CRLF
+    ret
+             ;JC MOVED THIS ROUTINE EARLIER as a diagnostic.
+             ; The location didn"t matter, I still saw endless 04"s.
+.align   32   
+chkio_surrogate:  ;(equivalent to chin for TINY BASIC)
+             ; =======================BEGIN FEEDER
+             ; JC MAKING A STARTUP SCRIPT, USEFUL FOR DEBUGGING AND
+             ; also possibly useful for the real thing.
+             ; It pretends to be serial input.  Can enter a program, etc.
+          IF   (FEED = TRUE) | ((DEBUG = TRUE)&(FEEDDEBUG=TRUE))   
+          PUSH   HL   
+          LD   HL,(FEEDER_TINYBASIC)   
+          LD   a,(HL)   
+          INC   HL   
+          LD   (FEEDER_TINYBASIC),HL   
+          OR   a   ; Check if zero, null-terminated script
+          POP   HL   
+          JR   z,End_feeding   
+          RET      
+          ENDIF      
+END_FEEDING:      
+             ; =======================END FEEDER
+          IF   DEBUG = FALSE   
+             ; read a char from uart
+;Return Zero if there isn't one.
+             ;JC saw this function failing.  Now testing to see if
+             ;this location will tolerate a plain chin call:
+          CALL   chin   
+        ret	
+             ;END jc test
+chkiosurrage1:
+          LD   a,0   
+        in0a    STAT1
+        and 10000000b
+       ret z                   ;this wasn't working
+        in0a     RDR1
+          CP   27   ; JC adding abort.
+          JP   z,apl_code_normal_start   
+        ret
+.else ; DEBUG MODE
+    ld a,0
+    nop ; Use this moment to supply a byte to serial input?
+    nop ; Use this moment to supply a byte to serial input?
+    or a
+    ret
+.endif
+.align   32   
+Clear_ASCIs: ;MOVE this to Clear_ASCIs_actual for build.
+Clear_ASCIs_actual:
+;This is to clear any serial characters accidentally following the character choice.
+; This is important for my terminal program which sends crlf when
+;I enter lines for sending (Cutecom).  
+    in0a     RDR1
+    CALL   ShortDelay
+    CALL   ShortDelay
+    in0a     RDR1
+    CALL   ShortDelay
+    CALL   ShortDelay
+    in0a     RDR1
+    CALL   ShortDelay
+    CALL   ShortDelay
+    in0a     RDR1
+    CALL   ShortDelay   
+    CALL   ShortDelay   
+Clear_ASCIs_debug:
+    ret
+
+Call_Debugger:
+    call Clear_ASCIs
+    call monitor_pre_start
+    jp okprompt
+
+Call_TinyBasic:
+    call Clear_ASCIs
+    call tinybasic_start
+    jp okprompt
+
+puthexword:  ;WORD in BC
+    push AF
+    push BC
+    ld a,b
+    and 0f0h ; First nybble ; not sure why this step is needed
+    rrca
+    rrca
+    rrca
+    rrca
+    and 00fh
+    call NASCII
+    call MONOUT
+    ld a,b
+    and 0fh  ; Second nybble
+    call NASCII
+    call MONOUT
+    ; SECOND BYTE:
+    ld a,c
+    and 0f0h ; First nybble ; not sure why this step is needed
+    rrca
+    rrca
+    rrca
+    rrca
+    and 00fh
+    call NASCII
+    call MONOUT
+    ld a,c
+    and 0fh  ; Second nybble
+    call NASCII
+    call MONOUT
+    pop BC
+    pop AF
+    ret
+    
+TEMP_BYTE_PUTHEX defs 1
+
+puthexbyte:
+    ld (TEMP_BYTE_PUTHEX),a
+    and 0f0h ; First nybble
+    rrca
+    rrca
+    rrca
+    rrca
+    and 00fh
+    call NASCII
+    call MONOUT
+    ld a,(TEMP_BYTE_PUTHEX)
+    and 0fh  ; Second nybble
+    call NASCII
+    call MONOUT
+    ret
+
+DUMPSTART: defw 0
+DUMPtemp: defs 2
+DUMP_MEMORY:
+    ;At the moment this dumps ALL 64K OF MEMORY.  Starts at DUMPSTART.
+    ;SET bottom and top
+    ;Exchange SP and BC
+    ;Store BC
+    ;Exchange SP and BC
+    ;Print out the SP
+    ;Get PC
+    ;Print out the PC somehow.  I think I did code for this!
+; MARK THE BOTTOM OF THE STACK SO WE CAN SEE IT IN A HEX DUMP
+    ld HL,0EFBEh   ;BEEF +
+    push HL
+    ld HL,0ADDEh   ;DEAD => DEADBEEF in hex dump marking stack
+    push HL
+    ld HL,'K!'
+    push HL
+    ld HL,'AC'
+    push HL
+    ld HL,'ST'
+    push HL
+
+    CALL DUMPMEM
+
+    pop HL 
+    pop HL 
+    pop HL 
+    pop HL 
+    pop HL 
+    jp okprompt
+CHECK_SERIN1:      
+          in0a    STAT1
+          AND   10000000b   
+          RET      
+DUMPMEM:
+    ;At the moment this dumps ALL 64K OF MEMORY.  Starts at DUMPSTART.
+    ;Start at zero.  Maybe later I will have parameters.
+    ld HL,(DUMPSTART)
+    call Clear_ASCIs ; It was getting false characters because I hit return
+      ; This just makes sure an initial spurious keypress 
+      ; doesn't interrupt the hex dump.
+DUMPMEM1:
+    ld a,l
+    and 01Fh
+          JR   nz,sameline2   
+dump_not_stopped1:    
+          CALL   CRLF   ;Next line
+          CALL   check_serin1   ; ANY KEY will stop the dump
+          JP   nz,stoppeddump   
+    ld bc,hl
+    call puthexword
+    ld a,':'
+    call MONOUT
+    ld a,' '
+    call MONOUT
+sameline2:      
+    ld a,(HL)
+    call puthexbyte
+    inc HL
+    ;Check for HL=0
+    ld a,h
+    or l
+    or a ; It wasn't stopping before.  I don't know why.  Adding this to test JC
+    jr nz,DUMPMEM1
+stoppeddump:      
+    ret
+
+; This got reformatted when I lost code.
+DUMP_IO0:
+          CALL   Clear_ASCIs   ; ward off accidental keystrokes
+DUMPIO0:      
+          LD   HL,(DUMPSTART)   
+          LD   a,l   
+          AND   01Fh   
+          JR   nz,sameline0   
+          CALL   CRLF   ;Next line
+          CALL   check_serin1   ; ANY KEY will stop the dump
+          JP   nz,stoppeddump0   
+          LD   bc,hl   
+          CALL   puthexword   
+          LD   a,":"   
+          CALL   MONOUT   
+          LD   a," "   
+          CALL   MONOUT   
+SAMELINE0:      
+          LD   bc,hl   
+             ;    ld b,h  ; need this on HD64180 for in a,(C); b is the high byte
+          IN   a,(c)   
+          CALL   puthexbyte   
+          INC   HL   
+             ;Check for L=0, just doing first page.
+          LD   a,l   
+          OR   a   ; Check to see if this is zero
+          JR   nz,DUMPIO0   
+STOPPEDDUMP0:      
+          JP   okprompt   ; Return to James' menu
+	  
+DUMP_IOxxxx:
+    ;This dumps ALL 64K OF I/O.  Starts at DUMPSTART which is probably 0.
+    ld HL,(DUMPSTART)
+    call Clear_ASCIs ;
+DUMPIO1:
+    ld a,l
+    and 01Fh
+    jr nz, sameline4
+
+    call CRLF;Next line
+          CALL   check_serin1   ; ANY KEY will stop the dump
+          JP   nz,stoppeddump2   
+    ld bc,hl
+    call puthexword
+    ld a,':'
+    call MONOUT
+    ld a,' '
+    call MONOUT
+sameline4:      
+    ld bc,hl
+    in a,(c)
+    call puthexbyte
+    inc HL
+    ;Check for HL=0
+    ld a,h
+    or l
+    or a 
+    jr nz,DUMPIO1
+stoppeddump2:      
+    jp okprompt   ; Return to James' menu
+    
+
+FILL_MEMORY: ; SURE TO CRASH THE MACHINE.  Top down.
+    CALL FILLMEM
+    jp okprompt
+FILLMEM:
+    ;Start at $FFFF and work down.   Maybe later we can add parameters.
+    ; This seems useless but I'm learning to write these loops.
+    ld h,0
+    ld l,h
+FILLMEM1:
+    dec HL
+    ld a,l
+    and 0FFh
+    jr nz, notzero6
+    ld a,CR
+    call MONOUT
+    ld a,LF
+    call MONOUT
+    ld bc,hl
+    call puthexword
+    ld a,':'
+    call MONOUT
+    call chin   ; WAIT FOR A KEYPRESS  This can be used to control the fill.
+    ld a,' '
+    call MONOUT
+notzero6:
+writethebyte:
+    ld a,55h ; nice flavorful number
+    ld (HL),a
+    inc HL
+    ;Check for HL=0
+    ld a,h
+    or l
+    jr nz,FILLMEM1
+    ret
+    
+Do_Other_Testing:
+    ld   bc,Message
+    call ShowMessage
+    call Delay
+    
+    ld hl, Message+3
+    db 0EDh, 038h, 038h ;in0 a,(38h)
+    ld b,a
+    db 0EDh, 038h, 039h ;in0 a,(39h)
+    ld c,a
+    call MakeHexMessage
+    db 0EDh, 038h, 03Ah ;in0 a,(3Ah)
+    ld b,a
+    ;db 0EDh, 038h, 036h ;in0 a,(36h)
+    in0a 36h
+    ld c,a
+    call MakeHexMessage
+    
+    ld   bc,Message
+    call ShowMessage
+     ; JC trying to get out of here
+     JP   okprompt   ; JC's OK prompt.  Not a total restart.
+     call ResetAndExit
+     ret  ; neither of these thing happen if I jump to the ok prompt
+
+   ; My assembler won't take the new mnemonics.
+OutSer0:  
+    out0a (TDR0)
+    ret
+OutSer1:
+    out0a (TDR1)
+    ret
+
+OUTBYTE: DEFS 1   ; storage byte to send
+
+; THIS IS THE BYTE OUTPUT FUNCTION FOR
+; THE NASCOM BASIC (and presumably monitor, wherever that is!)
+MONOUT: ; MOVE THIS TO MONOUT_actual for BUILD:        
+MONOUT_actual:
+.if DEBUG = FALSE
+        push af
+        push bc ; I don't know, I am still having problems.  May not need this.
+        push de
+        ; BLOCKING as long as the ShortDelay
+        CALL OutSer0           ; output a char
+        CALL OutSer1           ; output a char
+        call ShortDelay  ; Using a delay to prevent character loss when not polling TDRE
+        pop de
+        pop bc
+        pop af
+MONOUT_debug1: 
+        ret
+.else ; DEBUG MODE
+    nop ; 
+    nop ; Use this moment to recognize a byte of output
+    ret
+.endif
+
+MONOUT_checkready:  ; This sends but checks TDRE to see if Transmit Data Register is Empty, rather than using a delay.
+ ; THIS DOES NOT WORK ON BROTHER TYPEWRITERS WITH RXA PINS SHORTED TO HANDSHAKING.
+        ; BLOCKING
+        ld (OUTBYTE),a  ; store it
+notready0:
+        in0a    STAT0
+        in0a    STAT0
+        and 00000010b  ; poll TDRE (Transmit data register empty)
+        jr  z, notready0
+        ld a,(OUTBYTE)
+        CALL OutSer0           ; output a char
+notready1:
+        in0a    STAT1
+        in0a    STAT1
+        and 00000010b  ; poll TDRE (Transmit data register empty)
+        jr  z, notready1
+        ld a,(OUTBYTE)
+        CALL OutSer1           ; output a char
+;        call ShortDelay  ; I was using a delay to prevent character loss when not polling TDRE
+        ld a,(OUTBYTE); Make sure I didn't trash the byte, like in the delay?
+                    ; that was stupid!
+MONOUT_debug2: 
+        ret
+
+ShortDelay_Length: DEFW 90
+ShortDelay:
+    ;fine-tuning a delay for 9600 baud serial
+    push af
+    push bc
+    ld a,255
+    ld bc, (ShortDelay_Length) ; 20 was too short
+    Outer2:
+        nop
+        nop
+        nop
+        dec bc                  ;Decrements BC
+        ld a, b                 ;Copies B into A
+        or c                    ;Bitwise OR of C with A (now, A = B | C)
+    jp nz, Outer2            ;Jumps back to Outer: label if A is not zero
+    pop bc
+    pop af  
+    ret                     ;Return from call to this subroutine
+    
+   
+
+;JC wants to incorporate this kind of polling to make sure txrdy
+;write_char:		ld	b,a			;store char
+;write_char_loop:	in	a,(3)			;check if OK to send
+;			and	001h			;check TxRDY bit
+;			jp 	z,write_char_loop	;loop if not set
+;			ld 	a,b			;get char back
+;			out 	(2),a			;send to output
+;			ret				;returns with char in a
+
+MakeHexMessage:  ; PROVIDE hex value in BC.  
+   ; Provide text buffer in hl
+    push bc
+; First byte
+    ld a,b
+    and 0f0h ; First nybble
+    rrca
+    rrca
+    rrca
+    rrca
+    call NASCII
+    ld (hl),a
+    inc hl
+    ld a,b
+    and 0fh  ; Second nybble
+    call NASCII
+    ld (hl),a
+    
+    inc hl
+; 2nd byte
+    ld a,c
+    and 0f0h ; Third nybble
+    rrca
+    rrca
+    rrca
+    rrca
+    call NASCII
+    ld (hl),a
+    inc hl
+    ld a,c
+    and 0fh  ; Fourth nybble
+    call NASCII
+    ld (hl),a
+
+    inc hl
+    ld (hl),0FFh    
+    ; Don't increment.  Could do multiple ops in sequence.
+    pop bc
+    ret
+    
+NASCII: ; Convert a Hex nybble to an ASCII character
+    cp 10
+    jr c,NAS1
+    ADD a,7
+NAS1:
+    ADD a,'0'
+    ret
+
+ResetAndExit:
+    ld      a,0eh
+    rst     28h
+    ld      a,06h
+    rst     28h
+    ld      a,01h
+    rst     30h
+ret
+
+ConfigureSerial:
+; Note, the prescaler is 111 (external clock) on reset.  
+;This changes it to the fastest internal baud rate. 
+; Clock rate is 12.27Mhz (Clock speed) / divisor for 001 = 12270000/320.
+; It's 38343, close to 38400.
+; My crystal is 12.27
+; Trying a different divisor to get slower signal.
+;
+    ld a,0
+ ;   ld b,a
+ ;   ld c,a
+    ld a,01100100b
+    out0a CNTLA0    ;   out (CNTLA0),a
+;    ld a,00000001b  ; 19200bps ; Didn't work for input.
+    ld a,00000010b  ; 9600bps
+;    ld a,00001110b  ; 150bps
+    out0a CNTLB0    ;   out (CNTLB0),a
+    
+    ld a,01100100b
+    out0a CNTLA1    ;    out (CNTLA1),a
+    ld a,00000010b  ; 9600bps
+;    ld a,00001010b  ; 2400bps
+    out0a CNTLB1    ;    out (CNTLB1),a
+    ret
+    
+TestSerial:
+    ld de,0500h ; do it about 5*256 times or 1280 times
+Loopserial:
+    ld a,'T'
+    call MONOUT
+    ld a,'E'
+    call MONOUT
+    ld a,'S'
+    call MONOUT
+    ld a,'T'
+    call MONOUT
+    ld a,13
+    call MONOUT
+    call code_start
+;    call COLD   ; call BASIC. 
+    dec de
+    jr Loopserial
+    
+exit1:    
+    ret
+ 
+ShowMessage:
+    push    bc
+    push    de
+    push    hl
+;    ld      bc,Message ; Take it as a parameter!
+    call    ClearMessageBar
+    call    GetBottomMenuPtr
+    ld      a,(bc) ; Loading &0e into a
+    ld      d,a ; d = &0e
+    inc     bc ; points to: 00
+    ld      a,(bc); Loads &00 into a
+    ld      e,a ; Moves &00 to e
+    inc     bc ; Point to &90
+    push    de ; Puts 0e00 onto stack
+    push    bc ; addr onto stack
+    ld      de,0000h ; de reset to 0
+Jbwd:
+    inc     hl ; ???
+    inc     bc ; moves to: &00
+    ld      a,(bc) ; a is now &00
+    cp      0ffh ; looking for ff (our terminator)
+    jr      z,Jfwd          ; (+06h)
+    ld      (hl),a ; hl
+    inc     hl
+    inc     de
+    inc     de
+    jr      Jbwd
+Jfwd:
+    pop     bc
+    ld      a,(bc)
+    cp      00h
+    jr      z,FlushAndExit
+    call    GetBottomMenuPtr
+    ld      a,(bc)
+; This loop inverts the text to be a yellow bar with black writing
+; Start Invert
+    ld      b,5bh ; 91
+Again:
+    ld      (hl),a
+    inc     hl
+    inc     hl
+    djnz    Again    ;loops 91 times (cause of b)
+; End Invert
+    ld      de,00b6h
+FlushAndExit:
+    ld      c,e
+    ld      b,d
+    pop     hl
+    call    FlushMenu ; or redraw?
+    pop     hl
+    pop     de
+    pop     bc
+ret     
+
+ClearMessageBar:
+    push    bc
+    push    de
+    push    hl
+    call    GetBottomMenuPtr
+    ex      de,hl
+    call    GetBottomMenuPtr
+    inc     de ; de is no +1 of hl
+    ld      (hl),00h ; write 00 to hl
+    ld      bc,0111h ; set max to 111
+    ldir    ; Now loop, wiping everything
+    pop     hl
+    pop     de
+    pop     bc
+ret
+
+GetBottomMenuPtr: ; loads ptr to hl
+    push    af
+    push    bc
+    ld      a,05h
+    ld      b,00h
+             ;JC testing direct call instead of rst
+             ;   rst     30h
+          CALL   0030h   ;JC testing direct call instead of rst
+    pop     bc
+    pop     af
+ret
+
+FlushMenu:
+    push    af
+    push    de
+    push    hl
+    ex      de,hl
+    call    GetBottomMenuPtr
+    ld      a,13h
+             ;JC testing direct call instead of rst
+             ;    rst     10h
+          CALL   0010h   ;JC testing direct call instead of rst
+    pop     hl
+    pop     de
+    pop     af
+ret
+
+; Thanks to: http://www.paleotechnologist.net/?p=2589
+; This will cause a ~10 sec or so delay (depending on clock speed)
+Delay:
+    ld bc, 100h            ;Loads BC with hex 100
+    Outer1:
+        ld de, 1000h            ;Loads DE with hex 1000
+            Inner1:
+                dec de                  ;Decrements DE
+                ld a, d                 ;Copies D into A
+                or e                    ;Bitwise OR of E with A (now, A = D | E)
+            jp nz, Inner1            ;Jumps back to Inner: label if A is not zero
+        dec bc                  ;Decrements BC
+        ld a, b                 ;Copies B into A
+        or c                    ;Bitwise OR of C with A (now, A = B | C)
+    jp nz, Outer1            ;Jumps back to Outer: label if A is not zero
+ret                     ;Return from call to this subroutine
+
+; Not currently used, but will lock up the typewriter
+; Used this before I found the Delay
+InfiniLoop:
+    ld  b, 00h
+    ld  a,b
+    cp  00h
+jr  z,InfiniLoop
+
+Message:
+;    db $0d, $01, $71, $01 ; This came out underlined inverted, with -> arrow on left, not flashing
+;    db $0c, $02, $62, $03 ; This came out underlined, noninverted, down-arrows at beginning, up one line from previous
+;    db $08, $03, $53, $33 ;Looks like line 8?, underline, "3" at beginning, Inverted
+;    db $01, $04, $53, 0 ;Underlined, 2nd line, inverted, not flashing.  Not aligned left, I'm thinking it moved over.   
+;    db $0f, $05, $00, $00 ; This produced normal text. 
+;    db $0f, $15, $FF, $00 ; This produced an inverted blinking underline with no text.
+;    db $00, $00, $28 ; Top left, no special attributes apparent... noninverting, not flashing not underlined.  Cleared the line.  
+;    db $00, $00, $44 ; This produced a cleared line.  Black text on black background?
+;    db $00, $00, $BB ; Inverted, with flashing DOUBLE underline and flashing text.
+;   ... I didn't notice the double underline before, but it may already have shown up.
+;    ... Some of the underlines were higher.  
+             ;db $00, $00, $0C ; Blank line across the top?
+             ;db $00, $00, $1B ; Looks like double-underline inverted, not flashing
+             ;I think some of the "no text" options may be hidden because of my 5500's character ROM!
+             ; Maybe it will show differently on Andy's 2450?
+             ; Going to check each attribute flag in sequence.
+             ;db $00, $00, $01 ; Single underline, noninverted.
+             ;db $00, $00, $02 ; Single underline, noninverted.
+             ;db $00, $00, $04 ; Completely blank/invisible?
+             ;db $00, $00, $08 ; Plain text, noniverted, no underline.
+             ;db $00, $00, $10 ; Inverted text, no underline.
+             ;db $00, $00, $20 ; Plain text, noninverted, no underline.
+             ;db $00, $00, $40 ; Plain text
+             ;db $00, $00, $80 ; Flashing plain text.
+             ;db $00, $00, $0F ; Double underline, EMPTY/NO TEXT, noninverted, not flashing.
+          defb  $00,$00,$80   ; testing...
+          defb  "Hello"   
+          defb  $00   ; spaces are nulls for message bar
+          defb  "Andy!"   
+          defb  $ff   ; String terminator
+Message2:
+    db $0e, $00, $90, $00 ; Message bar, yes. Offset of some sort
+    db "This_is_doing_something"
+    db $00 ; spaces are nulls for message bar
+    db "Different!"
+    db $ff ; String terminator    
+    
+
+; JC string output Function.  Prints the null-terminated string after the CALL.
+strout:
+    ex	(sp),hl
+strout1:	ld	a,(hl)
+	inc	hl
+	or	a
+	jr	z,strout2
+	call MONOUT  
+	jr	strout
+strout2:	
+    ex	(sp),hl
+	ret
+	
+; STUFF GOT REFORMATTED FROM VERSION LOSS
+
+             ; read a char from serial 1.  Trouble with serial 0.
+             ;Blocking.  Waits until a character arrives.
+             ; JC CHANGING TO SINGLE SERIAL.
+chin:
+chin_actual:
+             ; =======================BEGIN FEEDER
+             ; JC MAKING A STARTUP SCRIPT, USEFUL FOR DEBUGGING AND
+             ; also possibly useful for the real thing.
+             ; It pretends to be serial input.  Can enter a program, etc.
+          IF   (FEED = TRUE) | ((DEBUG = TRUE)&(FEEDDEBUG=TRUE))   
+          PUSH   HL   
+          LD   HL,(FEEDER_CHIN)   
+          LD   a,(HL)   
+          INC   HL   
+          LD   (FEEDER_CHIN),HL   
+          OR   a   ; Check if zero, null-terminated script
+          POP   HL   
+          JR   z,End_feeding_chin   
+          RET      
+          ENDIF      
+END_FEEDING_CHIN:      
+             ; =======================END FEEDER
+POLLSERIAL:      
+          IF   DEBUG = FALSE   
+          in0a    STAT1
+          AND   10000000b   
+          JR   z,pollserial   
+	  in0a     RDR1
+          CP   27   
+          JP   z,apl_code_normal_start   
+          ELSE      
+          NOP      ; SERIAL INPUT into A..
+          NOP      ; 
+          ENDIF      
+          RET      
+             ; The dual serial poll is not in use at the moment.
+pollserialboth:
+pollserialboth0:
+        in0a    STAT0
+        and 10000000b
+        jr  z, pollserialboth1
+        in0a     RDR0
+          CP   27   
+          JP   z,apl_code_normal_start   
+        ret	
+pollserialboth1:
+        in0a    STAT1
+        and 10000000b
+        jr  z, pollserialboth0
+        in0a     RDR1
+          CP   27   
+          JP   z,apl_code_normal_start   
+        ret	
+             ;.if TRUE = FALSE
+chin_timeout:  ; THIS variant uses a timeout and returns a character when the timeout expires
+pollserialbotht:
+        push de
+        ld d,255
+        ld e,d
+pollserialbotht0:
+             ; do timeout
+        dec e
+        jr nz,pollnocarryt
+pollcarryt: 
+        dec d
+        jr nz,pollnocarryt
+    ;  Uncomment the character you would return.
+;        ld a,"."  ;Use this to define a "timeout" response.
+;        ld a,255  ;Use this to define a "timeout" response.
+        ld a,0  ;Use this to define a "timeout" response.
+        pop de
+        ret  
+pollnocarryt:
+        in0a    STAT0
+        and 10000000b
+        jr  z, pollserialbotht1
+        in0a     RDR0
+        pop de
+        ret	
+pollserialbotht1:
+        in0a    STAT1
+        and 10000000b
+        jr  z, pollserialbotht0
+        in0a     RDR1
+        pop de
+        ret	
+             ;.endif
+             ;.if TRUE = FALSE
+check_serial0in:
+        in0a    STAT0
+        and 10000000b
+        ret
+check_serial1in:
+        in0a    STAT0
+        and 10000000b
+        ret
+
+check_serialeither:
+        in0a    STAT0
+        and 10000000b
+        jr  z, chkserialeither1
+        ret	
+chkserialeither1:
+        in0a    STAT1
+        and 10000000b
+        ret 
+             ;.endif
+TEST_Z80_IN:      ;testing I/O without HD64180 extended instructions
+          in0a    STAT1 ;use the 64180 instr. to check
+          AND   10000000b   
+          LD   a,0   ; A is used for the high 8 bits of I/O address on HD64180 for this opcode.
+          IN   a,(RDR1)   
+          CP   "q"   
+          RET   z   
+          CALL   MONOUT   
+          JP   Test_Z80_In   
+TEST_Z80_OUT:      ;testing I/O without HD64180 extended instructions
+          CALL   chin   
+          CP   "q"   
+          RET   z   
+          LD   b,0   ; This is more tedious than the IN instruction b/c it needs BC.
+          LD   c,TDR1   
+          OUT   (C),a   
+          JP   Test_Z80_In   
+TEST_CHKIO_SURROGATE_ECHO:      ;This is failing on its own.
+          CALL   chkio_surrogate   
+          JR   nz,havecharsurrogate   
+             ; Got zero flag from my surrogate, what about?
+          LD   b,a   
+          LD   a,"Z"   
+          CALL   MONOUT   
+          LD   a,b   
+HAVECHARSURROGATE:      
+          CALL   puthexbyte   
+          JP   Test_CHKIO_SURROGATE_echo   
+TEST_CHKIO_ECHO:      
+          CALL   CHKIO   ; Chkio should act similarly to my surrogate.  Return z if nothing.
+          JR   nz,havecharchkio   
+             ; Got zero flag, what about?
+          LD   b,a   
+          LD   a,"Z"   
+          CALL   MONOUT   
+          LD   a,b   
+HAVECHARCHKIO:      
+          CALL   puthexbyte   
+          JP   Test_CHKIO_echo   
+; JC INSERTING TINYBASIC: BASIC BEGIN
+; JC CALLING MONOUT IN PLACE OF OUTC... though atm I can't find OUTC
+;Modified Nov 1 2016 by Donn Stewart for use in CPUville Z80 computer
+;Changed UART (ACIA) port numbers to 3 for status, 2 for data in INIT, CHKIO, O
+;Status bit for read in CHKIO changed to 0x02
+;Status bit for write in OUTC (actually OC3) changed to 0x01
+;Changed UART initialization parameters in INIT
+;Changed ORG statements at end of file to match system with 2K RAM
+;*************************************************************
+; 
+;                 TINY BASIC FOR INTEL 8080
+;                       VERSION 2.0
+;                     BY LI-CHEN WANG
+;                  MODIFIED AND TRANSLATED
+;                    TO INTEL MNEMONICS
+;                     BY ROGER RAUSKOLB
+;                      10 OCTOBER,1976
+;                        @COPYLEFT
+;                   ALL WRONGS RESERVED
+; 
+;*************************************************************
+; 
+; *** ZERO PAGE SUBROUTINES ***
+; 
+; THE 8080 INSTRUCTION SET LETS YOU HAVE 8 ROUTINES IN LOW
+; MEMORY THAT MAY BE CALLED BY RST N, N BEING 0 THROUGH 7.
+; THIS IS A ONE BYTE INSTRUCTION AND HAS THE SAME POWER AS
+; THE THREE BYTE INSTRUCTION CALL LLHH.  TINY BASIC WILL
+; USE RST 0 AS START AND RST 1 THROUGH RST 7 FOR
+; THE SEVEN MOST FREQUENTLY USED SUBROUTINES.
+; TWO OTHER SUBROUTINES (CRLF AND TSTNUM) ARE ALSO IN THIS
+; SECTION.  THEY CAN BE REACHED ONLY BY 3-BYTE CALLS.
+; 
+	 .MACRO DWA   ; %%1 is WHERE
+	DB	((%%1 /256) | 128)
+	DB	(%%1 & 0FFH)
+	 .ENDM
+;
+;JC REMOVING ORG
+;   ORG	0H
+;.ent $   ; ENTRY POINT FOR DEBUGGING. Debug entry.  JC testing Tiny basic.
+
+.align 0x100
+
+tinybasic_start: 
+START:
+;JC COMMENTING STACK RESET.  Well I was, but now I'm going to restore it.
+    LD	SP,STACK	; *** COLD START ***
+; JC NOTE HARDHAT AREA BROTHER TYPEWRITER: Need o work out how to 
+; reset the stack so that it isn't corrupted by running BASIC.
+; I'm avoiding the problem for the moment.
+; Old computers didn't mind the stack starting over for single-tasking apps.
+; In this case (Brother wordprocessor), we might want to exit gracefully.
+	LD	A,0FFH
+	JP	INIT
+
+	DEFB	'W' ;Remnant from LI-CHEN WANG Spacing out the RST vectors
+	DEFB	'AN' ;Remnant from LI-CHEN WANG Spacing out the RST vectors
+	DEFB	'G';Remnant from LI-CHEN WANG Spacing out the RST vectors. Props!
+
+IGNBLK:  ; JC using CALLs instead of RST x.  Remove this comment when settled.
+SS1:	LD	A,(DE)		; *** IGNBLK/RST 5 ***
+	CP	20H		; IGNORE BLANKS
+	RET	NZ		; IN TEXT (WHERE DE->)
+	INC	DE		; AND RETURN THE FIRST
+	JP	SS1		; NON-BLANK CHAR. IN A
+
+COMP:  ; JC using CALLs instead of RST x.  Remove this comment when settled.  
+	LD	A,H		; *** COMP OR RST 4 ***
+	CP	D		; COMPARE HL WITH DE
+	RET	NZ		; RETURN CORRECT C AND
+	LD	A,L		; Z FLAGS
+	CP	E		; BUT OLD A IS LOST
+	RET
+;
+TSTV:		; *** TSTV OR RST 7 ***
+;   JC CHANGING RST to CALL
+;	CALL IGNBLK
+    CALL IGNBLK
+	SUB	40H		; TEST VARIABLES
+	RET	C		; C:NOT A VARIABLE
+	JP	NZ,TV1		; NOT "@" ARRAY
+	INC	DE		; IT IS THE "@" ARRAY
+	CALL	PARN		; @ SHOULD BE FOLLOWED
+	ADD	HL,HL		; BY (EXPR) AS ITS INDEX
+	JP	C,QHOW		; IS INDEX TOO BIG?
+	PUSH	DE		; WILL IT OVERWRITE
+	EX	DE,HL		; TEXT?
+	CALL	SIZE		; FIND SIZE OF FREE
+	CALL COMP		; AND CHECK THAT
+	JP	C,ASORRY	; IF SO, SAY "SORRY"
+	LD	HL,VARBGN	; IF NOT GET ADDRESS
+	CALL	SUBDE		; OF @(EXPR) AND PUT IT
+	POP	DE		; IN HL
+	RET			; C FLAG IS CLEARED
+TV1:	CP	1BH		; NOT @, IS IT A TO Z?
+	CCF			; IF NOT RETURN C FLAG
+	RET	C
+	INC	DE		; IF A THROUGH Z
+	LD	HL,VARBGN	; COMPUTE ADDRESS OF
+	RLCA			; THAT VARIABLE
+	ADD	A,L		; AND RETURN IT IN HL
+	LD	L,A		; WITH C FLAG CLEARED
+	LD	A,0
+	ADC	A,H
+	LD	H,A
+	RET
+
+;TSTC:               ;*** TSTC OR RST 1 ***
+TSTC:  ; JC using CALLs instead of RST x.  Remove this comment when settled.
+	EX	(SP),HL		; *** TSTC OR RST 1 ***
+	CALL IGNBLK		; IGNORE BLANKS AND
+	CP	(HL)		; TEST CHARACTER
+    INC	HL		; COMPARE THE BYTE THAT
+	JP	Z,TC2		; FOLLOWS THE RST INST.
+	PUSH	BC		; WITH THE TEXT (DE->)
+	LD	C,(HL)		; IF NOT =, ADD THE 2ND
+	LD	B,0		; BYTE THAT FOLLOWS THE
+	ADD	HL,BC		; RST TO THE OLD PC
+	POP	BC		; I.E., DO A RELATIVE
+	DEC	DE		; JUMP IF NOT =
+TC2:	INC	DE		; IF =, SKIP THOSE BYTES
+	INC	HL		; AND CONTINUE
+	EX	(SP),HL
+	RET
+;
+TSTNUM:	LD	HL,0		; *** TSTNUM ***
+	LD	B,H		; TEST IF THE TEXT IS
+	CALL IGNBLK		; A NUMBER
+TN1:	CP	30H		; IF NOT, RETURN 0 IN
+	RET	C		; B AND HL
+	CP	3AH		; IF NUMBERS, CONVERT
+	RET	NC		; TO BINARY IN HL AND
+	LD	A,0F0H		; SET B TO # OF DIGITS
+	AND	H		; IF H>255, THERE IS NO
+	JP	NZ,QHOW		; ROOM FOR NEXT DIGIT
+	INC	B		; B COUNTS # OF DIGITS
+	PUSH	BC
+	LD	B,H		; HL=10*HL+(NEW DIGIT)
+	LD	C,L
+	ADD	HL,HL		; WHERE 10* IS DONE BY
+	ADD	HL,HL		; SHIFT AND ADD
+	ADD	HL,BC
+	ADD	HL,HL
+	LD	A,(DE)		; AND (DIGIT) IS FROM
+	INC	DE		; STRIPPING THE ASCII
+	AND	0FH		; CODE
+	ADD	A,L
+	LD	L,A
+	LD	A,0
+	ADC	A,H
+	LD	H,A
+	POP	BC
+	LD	A,(DE)		; DO THIS DIGIT AFTER
+	JP	P,TN1		; DIGIT. S SAYS OVERFLOW
+QHOW:	PUSH	DE		; *** ERROR "HOW?" ***
+AHOW:	LD	DE,HOW
+	JP	ERROR
+HOW:	DEFB	'HOW?'
+	DEFB	CR
+OK:	DEFB	'OK'
+	DEFB	CR
+WHAT:	DEFB	'WHAT?'
+	DEFB	CR
+SORRY:	DEFB	'SORRY'
+	DEFB	CR
+;
+;*************************************************************
+;
+; *** MAIN ***
+;
+; THIS IS THE MAIN LOOP THAT COLLECTS THE TINY BASIC PROGRAM
+; AND STORES IT IN THE MEMORY.
+;
+; AT START, IT PRINTS OUT "(CR)OK(CR)", AND INITIALIZES THE
+; STACK AND SOME OTHER INTERNAL VARIABLES.  THEN IT PROMPTS
+; ">" AND READS A LINE.  IF THE LINE STARTS WITH A NON-ZERO
+; NUMBER, THIS NUMBER IS THE LINE NUMBER.  THE LINE NUMBER
+; (IN 16 BIT BINARY) AND THE REST OF THE LINE (INCLUDING CR)
+; IS STORED IN THE MEMORY.  IF A LINE WITH THE SAME LINE
+; NUMBER IS ALREADY THERE, IT IS REPLACED BY THE NEW ONE.  IF
+; THE REST OF THE LINE CONSISTS OF A CR ONLY, IT IS NOT STORED
+; AND ANY EXISTING LINE WITH THE SAME LINE NUMBER IS DELETED.
+;
+; AFTER A LINE IS INSERTED, REPLACED, OR DELETED, THE PROGRAM
+; LOOPS BACK AND ASKS FOR ANOTHER LINE.  THIS LOOP WILL BE
+; TERMINATED WHEN IT READS A LINE WITH ZERO OR NO LINE
+; NUMBER; AND CONTROL IS TRANSFERED TO "DIRECT".
+;
+; TINY BASIC PROGRAM SAVE AREA STARTS AT THE MEMORY LOCATION
+; LABELED "TXTBGN" AND ENDS AT "TXTEND".  WE ALWAYS FILL THIS
+; AREA STARTING AT "TXTBGN", THE UNFILLED PORTION IS POINTED
+; BY THE CONTENT OF A MEMORY LOCATION LABELED "TXTUNF".
+;
+; THE MEMORY LOCATION "CURRNT" POINTS TO THE LINE NUMBER
+; THAT IS CURRENTLY BEING INTERPRETED.  WHILE WE ARE IN
+; THIS LOOP OR WHILE WE ARE INTERPRETING A DIRECT COMMAND
+; (SEE NEXT SECTION). "CURRNT" SHOULD POINT TO A 0.
+;
+RSTART:
+	LD	SP,STACK
+ST1:	CALL	CRLF		; AND JUMP TO HERE
+	LD	DE,OK		; DE->STRING
+	SUB	A		; A=0
+	CALL	PRTSTG		; PRINT STRING UNTIL CR
+	LD	HL,ST2+1	; LITERAL 0
+	LD	(CURRNT),HL	; CURRENT->LINE # = 0
+ST2:	LD	HL,0
+	LD	(LOPVAR),HL
+	LD	(STKGOS),HL
+ST3:	LD	A,3EH		; PROMPT '>' AND
+	CALL	GETLN		; READ A LINE
+	PUSH	DE		; DE->END OF LINE
+	LD	DE,BUFFTB	; DE->BEGINNING OF LINE
+	CALL	TSTNUM		; TEST IF IT IS A NUMBER
+	CALL IGNBLK
+	LD	A,H		; HL=VALUE OF THE # OR
+	OR	L		; 0 IF NO # WAS FOUND
+	POP	BC		; BC->END OF LINE
+	JP	Z,DIRECT
+	DEC	DE		; BACKUP DE AND SAVE
+	LD	A,H		; VALUE OF LINE # THERE
+	LD	(DE),A
+	DEC	DE
+	LD	A,L
+	LD	(DE),A
+	PUSH	BC		; BC,DE->BEGIN, END
+	PUSH	DE
+	LD	A,C
+	SUB	E
+	PUSH	AF		; A=# OF BYTES IN LINE
+	CALL	FNDLN		; FIND THIS LINE IN SAVE
+	PUSH	DE		; AREA, DE->SAVE AREA
+	JP	NZ,ST4		; NZ:NOT FOUND, INSERT
+	PUSH	DE		; Z:FOUND, DELETE IT
+	CALL	FNDNXT		; FIND NEXT LINE
+				; DE->NEXT LINE
+	POP	BC		; BC->LINE TO BE DELETED
+	LD	HL,(TXTUNF)	; HL->UNFILLED SAVE AREA
+	CALL	MVUP		; MOVE UP TO DELETE
+	LD	H,B		; TXTUNF->UNFILLED AREA
+	LD	L,C
+	LD	(TXTUNF),HL	; UPDATE
+ST4:	POP	BC		; GET READY TO INSERT
+	LD	HL,(TXTUNF)	; BUT FIRST CHECK IF
+	POP	AF		; THE LENGTH OF NEW LINE
+	PUSH	HL		; IS 3 (LINE # AND CR)
+	CP	3		; THEN DO NOT INSERT
+	JP	Z,RSTART	; MUST CLEAR THE STACK
+	ADD	A,L		; COMPUTE NEW TXTUNF
+	LD	L,A
+	LD	A,0
+	ADC	A,H
+	LD	H,A		; HL->NEW UNFILLED AREA
+	LD	DE,TXTEND	; CHECK TO SEE IF THERE
+	CALL COMP		; IS ENOUGH SPACE
+	JP	NC,QSORRY	; SORRY, NO ROOM FOR IT
+	LD	(TXTUNF),HL	; OK, UPDATE TXTUNF
+	POP	DE		; DE->OLD UNFILLED AREA
+	CALL	MVDOWN
+	POP	DE		; DE->BEGIN, HL->END
+	POP	HL
+	CALL	MVUP		; MOVE NEW LINE TO SAVE
+	JP	ST3		; AREA
+;
+;*************************************************************
+;
+; WHAT FOLLOWS IS THE CODE TO EXECUTE DIRECT AND STATEMENT
+; COMMANDS.  CONTROL IS TRANSFERED TO THESE POINTS VIA THE
+; COMMAND TABLE LOOKUP CODE OF 'DIRECT' AND 'EXEC' IN LAST
+; SECTION.  AFTER THE COMMAND IS EXECUTED, CONTROL IS
+; TRANSFERED TO OTHERS SECTIONS AS FOLLOWS:
+;
+; FOR 'LIST', 'NEW', AND 'STOP': GO BACK TO 'RSTART'
+; FOR 'RUN': GO EXECUTE THE FIRST STORED LINE IF ANY, ELSE
+; GO BACK TO 'RSTART'.
+; FOR 'GOTO' AND 'GOSUB': GO EXECUTE THE TARGET LINE.
+; FOR 'RETURN' AND 'NEXT': GO BACK TO SAVED RETURN LINE.
+; FOR ALL OTHERS: IF 'CURRENT' -> 0, GO TO 'RSTART', ELSE
+; GO EXECUTE NEXT COMMAND.  (THIS IS DONE IN 'FINISH'.)
+;*************************************************************
+;
+; *** NEW *** STOP *** RUN (& FRIENDS) *** & GOTO ***
+;
+; 'NEW(CR)' SETS 'TXTUNF' TO POINT TO 'TXTBGN'
+;
+; 'STOP(CR)' GOES BACK TO 'RSTART'
+;
+; 'RUN(CR)' FINDS THE FIRST STORED LINE, STORE ITS ADDRESS (IN
+; 'CURRENT'), AND START EXECUTE IT.  NOTE THAT ONLY THOSE
+; COMMANDS IN TAB2 ARE LEGAL FOR STORED PROGRAM.
+;
+; THERE ARE 3 MORE ENTRIES IN 'RUN':
+; 'RUNNXL' FINDS NEXT LINE, STORES ITS ADDR. AND EXECUTES IT.
+; 'RUNTSL' STORES THE ADDRESS OF THIS LINE AND EXECUTES IT.
+; 'RUNSML' CONTINUES THE EXECUTION ON SAME LINE.
+;
+; 'GOTO EXPR(CR)' EVALUATES THE EXPRESSION, FIND THE TARGET
+; LINE, AND JUMP TO 'RUNTSL' TO DO IT.
+;
+NEW:	CALL	ENDCHK		; *** NEW(CR) ***
+	LD	HL,TXTBGN
+	LD	(TXTUNF),HL
+;
+STOP:	CALL	ENDCHK		; *** STOP(CR) ***
+	JP	RSTART
+
+QUIT:     JP   EXIT_APL   ; *** JC ADDED THIS ***
+; 
+RUN:	CALL	ENDCHK		; *** RUN(CR) ***
+	LD	DE,TXTBGN	; FIRST SAVED LINE
+;
+RUNNXL:	LD	HL,0		; *** RUNNXL ***
+	CALL	FNDLP		; FIND WHATEVER LINE #
+	JP	C,RSTART	; C:PASSED TXTUNF, QUIT
+;
+RUNTSL:	EX	DE,HL		; *** RUNTSL ***
+	LD	(CURRNT),HL	; SET 'CURRENT'->LINE #
+	EX	DE,HL
+	INC	DE		; BUMP PASS LINE #
+	INC	DE
+;
+RUNSML:	CALL	CHKIO		; *** RUNSML ***
+	LD	HL,TAB2-1	; FIND COMMAND IN TAB2
+	JP	EXEC		; AND EXECUTE IT
+;
+GOTO:	CALL EXPR		; *** GOTO EXPR ***
+	PUSH	DE		; SAVE FOR ERROR ROUTINE
+	CALL	ENDCHK		; MUST FIND A CR
+	CALL	FNDLN		; FIND THE TARGET LINE
+	JP	NZ,AHOW		; NO SUCH LINE #
+	POP	AF		; CLEAR THE PUSH DE
+	JP	RUNTSL		; GO DO IT
+;
+;*************************************************************
+;
+; *** LIST *** & PRINT ***
+;
+; LIST HAS TWO FORMS:
+; 'LIST(CR)' LISTS ALL SAVED LINES
+; 'LIST #(CR)' START LIST AT THIS LINE #
+; YOU CAN STOP THE LISTING BY CONTROL C KEY
+;
+; PRINT COMMAND IS 'PRINT ....;' OR 'PRINT ....(CR)'
+; WHERE '....' IS A LIST OF EXPRESIONS, FORMATS, BACK-
+; ARROWS, AND STRINGS.  THESE ITEMS ARE SEPERATED BY COMMAS.
+;
+; A FORMAT IS A POUND SIGN FOLLOWED BY A NUMBER.  IT CONTROLS
+; THE NUMBER OF SPACES THE VALUE OF A EXPRESION IS GOING TO
+; BE PRINTED.  IT STAYS EFFECTIVE FOR THE REST OF THE PRINT
+; COMMAND UNLESS CHANGED BY ANOTHER FORMAT.  IF NO FORMAT IS
+; SPECIFIED, 6 POSITIONS WILL BE USED.
+;
+; A STRING IS QUOTED IN A PAIR OF SINGLE QUOTES OR A PAIR OF
+; DOUBLE QUOTES.
+;
+; A BACK-ARROW MEANS GENERATE A (CR) WITHOUT (LF)
+;
+; A (CRLF) IS GENERATED AFTER THE ENTIRE LIST HAS BEEN
+; PRINTED OR IF THE LIST IS A NULL LIST.  HOWEVER IF THE LIST
+; ENDED WITH A COMMA, NO (CRLF) IS GENERATED.
+;
+LIST:	CALL	TSTNUM		; TEST IF THERE IS A #
+	CALL	ENDCHK		; IF NO # WE GET A 0
+	CALL	FNDLN		; FIND THIS OR NEXT LINE
+LS1:	JP	C,RSTART	; C:PASSED TXTUNF
+	CALL	PRTLN		; PRINT THE LINE
+	CALL	CHKIO		; STOP IF HIT CONTROL-C
+	CALL	FNDLP		; FIND NEXT LINE
+	JP	LS1		; AND LOOP BACK
+;
+PRINT:	LD	C,6		; C = # OF SPACES
+	CALL TSTC		; IF NULL LIST & ";"
+	DEFB	3BH
+	DEFB	PR2-$-1
+	CALL	CRLF		; GIVE CR-LF AND
+	JP	RUNSML		; CONTINUE SAME LINE
+PR2:	CALL TSTC		; IF NULL LIST (CR)
+	DEFB	CR
+	DEFB	PR0-$-1
+	CALL	CRLF		; ALSO GIVE CR-LF AND
+	JP	RUNNXL		; GO TO NEXT LINE
+PR0:	CALL TSTC		; ELSE IS IT FORMAT?
+	DEFB	'#'
+	DEFB	PR1-$-1
+	CALL EXPR		; YES, EVALUATE EXPR.
+	LD	C,L		; AND SAVE IT IN C
+	JP	PR3		; LOOK FOR MORE TO PRINT
+PR1:	CALL	QTSTG		; OR IS IT A STRING?
+	JP	PR8		; IF NOT, MUST BE EXPR.
+PR3:	CALL TSTC		; IF ",", GO FIND NEXT
+	DEFB	','
+	DEFB	PR6-$-1
+	CALL	FIN		; IN THE LIST.
+	JP	PR0		; LIST CONTINUES
+PR6:	CALL	CRLF		; LIST ENDS
+	CALL FINISH
+PR8:	CALL EXPR		; EVALUATE THE EXPR
+	PUSH	BC
+	CALL	PRTNUM		; PRINT THE VALUE
+	POP	BC
+	JP	PR3		; MORE TO PRINT?
+;
+;*************************************************************
+;
+; *** GOSUB *** & RETURN ***
+;
+; 'GOSUB EXPR;' OR 'GOSUB EXPR (CR)' IS LIKE THE 'GOTO'
+; COMMAND, EXCEPT THAT THE CURRENT TEXT POINTER, STACK POINTER
+; ETC. ARE SAVE SO THAT EXECUTION CAN BE CONTINUED AFTER THE
+; SUBROUTINE 'RETURN'.  IN ORDER THAT 'GOSUB' CAN BE NESTED
+; (AND EVEN RECURSIVE), THE SAVE AREA MUST BE STACKED.
+; THE STACK POINTER IS SAVED IN 'STKGOS', THE OLD 'STKGOS' IS
+; SAVED IN THE STACK.  IF WE ARE IN THE MAIN ROUTINE, 'STKGOS'
+; IS ZERO (THIS WAS DONE BY THE "MAIN" SECTION OF THE CODE),
+; BUT WE STILL SAVE IT AS A FLAG FOR NO FURTHER 'RETURN'S.
+;
+; 'RETURN(CR)' UNDOS EVERYTHING THAT 'GOSUB' DID, AND THUS
+; RETURN THE EXECUTION TO THE COMMAND AFTER THE MOST RECENT
+; 'GOSUB'.  IF 'STKGOS' IS ZERO, IT INDICATES THAT WE
+; NEVER HAD A 'GOSUB' AND IS THUS AN ERROR.
+;
+GOSUB:	CALL	PUSHA		; SAVE THE CURRENT "FOR"
+	CALL EXPR		; PARAMETERS
+	PUSH	DE		; AND TEXT POINTER
+	CALL	FNDLN		; FIND THE TARGET LINE
+	JP	NZ,AHOW		; NOT THERE. SAY "HOW?"
+	LD	HL,(CURRNT)	; FOUND IT, SAVE OLD
+	PUSH	HL		; 'CURRNT' OLD 'STKGOS'
+	LD	HL,(STKGOS)
+	PUSH	HL
+	LD	HL,0		; AND LOAD NEW ONES
+	LD	(LOPVAR),HL
+	ADD	HL,SP
+	LD	(STKGOS),HL
+	JP	RUNTSL		; THEN RUN THAT LINE
+RETURN:	CALL	ENDCHK		; THERE MUST BE A CR
+	LD	HL,(STKGOS)	; OLD STACK POINTER
+	LD	A,H		; 0 MEANS NOT EXIST
+	OR	L
+	JP	Z,QWHAT		; SO, WE SAY: "WHAT?"
+	LD	SP,HL		; ELSE, RESTORE IT
+	POP	HL
+	LD	(STKGOS),HL	; AND THE OLD 'STKGOS'
+	POP	HL
+	LD	(CURRNT),HL	; AND THE OLD 'CURRNT'
+	POP	DE		; OLD TEXT POINTER
+	CALL	POPA		; OLD "FOR" PARAMETERS
+	CALL FINISH		; AND WE ARE BACK HOME
+;
+;*************************************************************
+;
+; *** FOR *** & NEXT ***
+;
+; 'FOR' HAS TWO FORMS:
+; 'FOR VAR=EXP1 TO EXP2 STEP EXP3' AND 'FOR VAR=EXP1 TO EXP2'
+; THE SECOND FORM MEANS THE SAME THING AS THE FIRST FORM WITH
+; EXP3=1.  (I.E., WITH A STEP OF +1.)
+; TBI WILL FIND THE VARIABLE VAR, AND SET ITS VALUE TO THE
+; CURRENT VALUE OF EXP1.  IT ALSO EVALUATES EXP2 AND EXP3
+; AND SAVE ALL THESE TOGETHER WITH THE TEXT POINTER ETC. IN
+; THE 'FOR' SAVE AREA, WHICH CONSISTS OF 'LOPVAR', 'LOPINC',
+; 'LOPLMT', 'LOPLN', AND 'LOPPT'.  IF THERE IS ALREADY SOME-
+; THING IN THE SAVE AREA (THIS IS INDICATED BY A NON-ZERO
+; 'LOPVAR'), THEN THE OLD SAVE AREA IS SAVED IN THE STACK
+; BEFORE THE NEW ONE OVERWRITES IT.
+; TBI WILL THEN DIG IN THE STACK AND FIND OUT IF THIS SAME
+; VARIABLE WAS USED IN ANOTHER CURRENTLY ACTIVE 'FOR' LOOP.
+; IF THAT IS THE CASE, THEN THE OLD 'FOR' LOOP IS DEACTIVATED.
+; (PURGED FROM THE STACK..)
+;
+; 'NEXT VAR' SERVES AS THE LOGICAL (NOT NECESSARILLY PHYSICAL)
+; END OF THE 'FOR' LOOP.  THE CONTROL VARIABLE VAR. IS CHECKED
+; WITH THE 'LOPVAR'.  IF THEY ARE NOT THE SAME, TBI DIGS IN
+; THE STACK TO FIND THE RIGHT ONE AND PURGES ALL THOSE THAT
+; DID NOT MATCH.  EITHER WAY, TBI THEN ADDS THE 'STEP' TO
+; THAT VARIABLE AND CHECK THE RESULT WITH THE LIMIT.  IF IT
+; IS WITHIN THE LIMIT, CONTROL LOOPS BACK TO THE COMMAND
+; FOLLOWING THE 'FOR'.  IF OUTSIDE THE LIMIT, THE SAVE AREA
+; IS PURGED AND EXECUTION CONTINUES.
+;
+FOR:	CALL	PUSHA		; SAVE THE OLD SAVE AREA
+	CALL	SETVAL		; SET THE CONTROL VAR.
+	DEC	HL		; HL IS ITS ADDRESS
+	LD	(LOPVAR),HL	; SAVE THAT
+	LD	HL,TAB5-1	; USE 'EXEC' TO LOOK
+	JP	EXEC		; FOR THE WORD 'TO'
+FR1:	CALL EXPR		; EVALUATE THE LIMIT
+	LD	(LOPLMT),HL	; SAVE THAT
+	LD	HL,TAB6-1	; USE 'EXEC' TO LOOK
+	JP	EXEC		; FOR THE WORD 'STEP'
+FR2:	CALL EXPR		; FOUND IT, GET STEP
+	JP	FR4
+FR3:	LD	HL,1H		; NOT FOUND, SET TO 1
+FR4:	LD	(LOPINC),HL	; SAVE THAT TOO
+FR5:	LD	HL,(CURRNT)	; SAVE CURRENT LINE #
+	LD	(LOPLN),HL
+	EX	DE,HL		; AND TEXT POINTER
+	LD	(LOPPT),HL
+	LD	BC,0AH		; DIG INTO STACK TO
+	LD	HL,(LOPVAR)	; FIND 'LOPVAR'
+	EX	DE,HL
+	LD	H,B
+	LD	L,B		; HL=0 NOW
+	ADD	HL,SP		; HERE IS THE STACK
+	DEFB	3EH
+FR7:	ADD	HL,BC		; EACH LEVEL IS 10 DEEP
+	LD	A,(HL)		; GET THAT OLD 'LOPVAR'
+	INC	HL
+	OR	(HL)
+	JP	Z,FR8		; 0 SAYS NO MORE IN IT
+	LD	A,(HL)
+	DEC	HL
+	CP	D		; SAME AS THIS ONE?
+	JP	NZ,FR7
+	LD	A,(HL)		; THE OTHER HALF?
+	CP	E
+	JP	NZ,FR7
+	EX	DE,HL		; YES, FOUND ONE
+	LD	HL,0H
+	ADD	HL,SP		; TRY TO MOVE SP
+	LD	B,H
+	LD	C,L
+	LD	HL,0AH
+	ADD	HL,DE
+	CALL	MVDOWN		; AND PURGE 10 WORDS
+	LD	SP,HL		; IN THE STACK
+FR8:	LD	HL,(LOPPT)	; JOB DONE, RESTORE DE
+	EX	DE,HL
+	CALL FINISH		; AND CONTINUE
+;
+NEXT:	CALL TSTV		; GET ADDRESS OF VAR.
+	JP	C,QWHAT		; NO VARIABLE, "WHAT?"
+	LD	(VARNXT),HL	; YES, SAVE IT
+NX0:	PUSH	DE		; SAVE TEXT POINTER
+	EX	DE,HL
+	LD	HL,(LOPVAR)	; GET VAR. IN 'FOR'
+	LD	A,H
+	OR	L		; 0 SAYS NEVER HAD ONE
+	JP	Z,AWHAT		; SO WE ASK: "WHAT?"
+	CALL COMP		; ELSE WE CHECK THEM
+	JP	Z,NX3		; OK, THEY AGREE
+	POP	DE		; NO, LET'S SEE
+	CALL	POPA		; PURGE CURRENT LOOP
+	LD	HL,(VARNXT)	; AND POP ONE LEVEL
+	JP	NX0		; GO CHECK AGAIN
+NX3:	LD	E,(HL)		; COME HERE WHEN AGREED
+	INC	HL
+	LD	D,(HL)		; DE=VALUE OF VAR.
+	LD	HL,(LOPINC)
+	PUSH	HL
+	LD	A,H
+	XOR	D
+	LD	A,D
+	ADD	HL,DE		; ADD ONE STEP
+	JP	M,NX4
+	XOR	H
+	JP	M,NX5
+NX4:	EX	DE,HL
+	LD	HL,(LOPVAR)	; PUT IT BACK
+	LD	(HL),E
+	INC	HL
+	LD	(HL),D
+	LD	HL,(LOPLMT)	; HL->LIMIT
+	POP	AF		; OLD HL
+	OR	A
+	JP	P,NX1		; STEP > 0
+	EX	DE,HL		; STEP < 0
+NX1:	CALL	CKHLDE		; COMPARE WITH LIMIT
+	POP	DE		; RESTORE TEXT POINTER
+	JP	C,NX2		; OUTSIDE LIMIT
+	LD	HL,(LOPLN)	; WITHIN LIMIT, GO
+	LD	(CURRNT),HL	; BACK TO THE SAVED
+	LD	HL,(LOPPT)	; 'CURRNT' AND TEXT
+	EX	DE,HL		; POINTER
+	CALL FINISH
+NX5:	POP	HL
+	POP	DE
+NX2:	CALL	POPA		; PURGE THIS LOOP
+	CALL FINISH
+;
+;*************************************************************
+;
+; *** REM *** IF *** INPUT *** & LET (& DEFLT) ***
+;
+; 'REM' CAN BE FOLLOWED BY ANYTHING AND IS IGNORED BY TBI.
+; TBI TREATS IT LIKE AN 'IF' WITH A FALSE CONDITION.
+;
+; 'IF' IS FOLLOWED BY AN EXPR. AS A CONDITION AND ONE OR MORE
+; COMMANDS (INCLUDING OTHER 'IF'S) SEPERATED BY SEMI-COLONS.
+; NOTE THAT THE WORD 'THEN' IS NOT USED.  TBI EVALUATES THE
+; EXPR. IF IT IS NON-ZERO, EXECUTION CONTINUES.  IF THE
+; EXPR. IS ZERO, THE COMMANDS THAT FOLLOWS ARE IGNORED AND
+; EXECUTION CONTINUES AT THE NEXT LINE.
+;
+; 'INPUT' COMMAND IS LIKE THE 'PRINT' COMMAND, AND IS FOLLOWED
+; BY A LIST OF ITEMS.  IF THE ITEM IS A STRING IN SINGLE OR
+; DOUBLE QUOTES, OR IS A BACK-ARROW, IT HAS THE SAME EFFECT AS
+; IN 'PRINT'.  IF AN ITEM IS A VARIABLE, THIS VARIABLE NAME IS
+; PRINTED OUT FOLLOWED BY A COLON.  THEN TBI WAITS FOR AN
+; EXPR. TO BE TYPED IN.  THE VARIABLE IS THEN SET TO THE
+; VALUE OF THIS EXPR.  IF THE VARIABLE IS PROCEDED BY A STRING
+; (AGAIN IN SINGLE OR DOUBLE QUOTES), THE STRING WILL BE
+; PRINTED FOLLOWED BY A COLON.  TBI THEN WAITS FOR INPUT EXPR.
+; AND SET THE VARIABLE TO THE VALUE OF THE EXPR.
+;
+; IF THE INPUT EXPR. IS INVALID, TBI WILL PRINT "WHAT?",
+; "HOW?" OR "SORRY" AND REPRINT THE PROMPT AND REDO THE INPUT.
+; THE EXECUTION WILL NOT TERMINATE UNLESS YOU TYPE CONTROL-C.
+; THIS IS HANDLED IN 'INPERR'.
+;
+; 'LET' IS FOLLOWED BY A LIST OF ITEMS SEPERATED BY COMMAS.
+; EACH ITEM CONSISTS OF A VARIABLE, AN EQUAL SIGN, AND AN EXPR.
+; TBI EVALUATES THE EXPR. AND SET THE VARIABLE TO THAT VALUE.
+; TBI WILL ALSO HANDLE 'LET' COMMAND WITHOUT THE WORD 'LET'.
+; THIS IS DONE BY 'DEFLT'.
+;
+REM:	LD	HL,0H		; *** REM ***
+	DEFB	3EH		; THIS IS LIKE 'IF 0'
+;
+IFF:	CALL EXPR		; *** IF ***
+	LD	A,H		; IS THE EXPR.=0?
+	OR	L
+	JP	NZ,RUNSML	; NO, CONTINUE
+	CALL	FNDSKP		; YES, SKIP REST OF LINE
+	JP	NC,RUNTSL	; AND RUN THE NEXT LINE
+	JP	RSTART		; IF NO NEXT, RE-START
+;
+INPERR:	LD	HL,(STKINP)	; *** INPERR ***
+	LD	SP,HL		; RESTORE OLD SP
+	POP	HL		; AND OLD 'CURRNT'
+	LD	(CURRNT),HL
+	POP	DE		; AND OLD TEXT POINTER
+	POP	DE		; REDO INPUT
+;
+INPUT:				; *** INPUT ***
+IP1:	PUSH	DE		; SAVE IN CASE OF ERROR
+	CALL	QTSTG		; IS NEXT ITEM A STRING?
+	JP	IP2		; NO
+	CALL TSTV		; YES, BUT FOLLOWED BY A
+	JP	C,IP4		; VARIABLE?   NO.
+	JP	IP3		; YES.  INPUT VARIABLE
+IP2:	PUSH	DE		; SAVE FOR 'PRTSTG'
+	CALL TSTV		; MUST BE VARIABLE NOW
+	JP	C,QWHAT		; "WHAT?" IT IS NOT?
+	LD	A,(DE)		; GET READY FOR 'PRTSTR'
+	LD	C,A
+	SUB	A
+	LD	(DE),A
+	POP	DE
+	CALL	PRTSTG		; PRINT STRING AS PROMPT
+	LD	A,C		; RESTORE TEXT
+	DEC	DE
+	LD	(DE),A
+IP3:	PUSH	DE		; SAVE TEXT POINTER
+	EX	DE,HL
+	LD	HL,(CURRNT)	; ALSO SAVE 'CURRNT'
+	PUSH	HL
+	LD	HL,IP1		; A NEGATIVE NUMBER
+	LD	(CURRNT),HL	; AS A FLAG
+	LD	HL,0H		; SAVE SP TOO
+	ADD	HL,SP
+	LD	(STKINP),HL
+	PUSH	DE		; OLD HL
+	LD	A,3AH		; PRINT THIS TOO
+	CALL	GETLN		; AND GET A LINE
+	LD	DE,BUFFTB	; POINTS TO BUFFER
+	CALL EXPR		; EVALUATE INPUT
+	NOP			; CAN BE 'CALL ENDCHK'
+	NOP
+	NOP
+	POP	DE		; OK, GET OLD HL
+	EX	DE,HL
+	LD	(HL),E		; SAVE VALUE IN VAR.
+	INC	HL
+	LD	(HL),D
+	POP	HL		; GET OLD 'CURRNT'
+	LD	(CURRNT),HL
+	POP	DE		; AND OLD TEXT POINTER
+IP4:	POP	AF		; PURGE JUNK IN STACK
+	CALL TSTC		; IS NEXT CH. ','?
+	DEFB	','
+	DEFB	IP5-$-1
+	JP	IP1		; YES, MORE ITEMS.
+IP5:	CALL FINISH
+;
+DEFLT:	LD	A,(DE)		; ***  DEFLT ***
+	CP	CR		; EMPTY LINE IS OK
+	JP	Z,LT1		; ELSE IT IS 'LET'
+;
+LET:	CALL	SETVAL		; *** LET ***
+	CALL TSTC		; SET VALUE TO VAR.
+	DEFB	','
+	DEFB	LT1-$-1
+	JP	LET		; ITEM BY ITEM
+LT1:	CALL FINISH		; UNTIL FINISH
+;
+;*************************************************************
+;
+; *** EXPR ***
+;
+; 'EXPR' EVALUATES ARITHMETICAL OR LOGICAL EXPRESSIONS.
+; <EXPR>::<EXPR2>
+;         <EXPR2><REL.OP.><EXPR2>
+; WHERE <REL.OP.> IS ONE OF THE OPERATORS IN TAB8 AND THE
+; RESULT OF THESE OPERATIONS IS 1 IF TRUE AND 0 IF FALSE.
+; <EXPR2>::=(+ OR -)<EXPR3>(+ OR -<EXPR3>)(....)
+; WHERE () ARE OPTIONAL AND (....) ARE OPTIONAL REPEATS.
+; <EXPR3>::=<EXPR4>(* OR /><EXPR4>)(....)
+; <EXPR4>::=<VARIABLE>
+;           <FUNCTION>
+;           (<EXPR>)
+; <EXPR> IS RECURSIVE SO THAT VARIABLE '@' CAN HAVE AN <EXPR>
+; AS INDEX, FUNCTIONS CAN HAVE AN <EXPR> AS ARGUMENTS, AND
+; <EXPR4> CAN BE AN <EXPR> IN PARANTHESE.
+;
+EXPR:  ; JC using CALLs instead of RST x.  Remove this comment when settled.
+	CALL	EXPR2		; *** EXPR OR RST 3 ***
+	PUSH	HL		; EVALUATE AN EXPRESSION
+	LD	HL,TAB8-1	; LOOKUP REL.OP.
+	JP	EXEC		; GO DO IT
+XP11:	CALL	XP18		; REL.OP.">="
+	RET	C		; NO, RETURN HL=0
+	LD	L,A		; YES, RETURN HL=1
+	RET
+XP12:	CALL	XP18		; REL.OP."#"
+	RET	Z		; FALSE, RETURN HL=0
+	LD	L,A		; TRUE, RETURN HL=1
+	RET
+XP13:	CALL	XP18		; REL.OP.">"
+	RET	Z		; FALSE
+	RET	C		; ALSO FALSE, HL=0
+	LD	L,A		; TRUE, HL=1
+	RET
+XP14:	CALL	XP18		; REL.OP."<="
+	LD	L,A		; SET HL=1
+	RET	Z		; REL. TRUE, RETURN
+	RET	C
+	LD	L,H		; ELSE SET HL=0
+	RET
+XP15:	CALL	XP18		; REL.OP."="
+	RET	NZ		; FALSE, RETURN HL=0
+	LD	L,A		; ELSE SET HL=1
+	RET
+XP16:	CALL	XP18		; REL.OP."<"
+	RET	NC		; FALSE, RETURN HL=0
+	LD	L,A		; ELSE SET HL=1
+	RET
+XP17:	POP	HL		; NOT .REL.OP
+	RET			; RETURN HL=<EXPR2>
+XP18:	LD	A,C		; SUBROUTINE FOR ALL
+	POP	HL		; REL.OP.'S
+	POP	BC
+	PUSH	HL		; REVERSE TOP OF STACK
+	PUSH	BC
+	LD	C,A
+	CALL	EXPR2		; GET 2ND <EXPR2>
+	EX	DE,HL		; VALUE IN DE NOW
+	EX	(SP),HL		; 1ST <EXPR2> IN HL
+	CALL	CKHLDE		; COMPARE 1ST WITH 2ND
+	POP	DE		; RESTORE TEXT POINTER
+	LD	HL,0H		; SET HL=0, A=1
+	LD	A,1
+	RET
+;
+EXPR2:	CALL TSTC		; NEGATIVE SIGN?
+	DEFB	'-'
+	DEFB	XP21-$-1
+	LD	HL,0H		; YES, FAKE '0-'
+	JP	XP26		; TREAT LIKE SUBTRACT
+XP21:	CALL TSTC		; POSITIVE SIGN? IGNORE
+	DEFB	'+'
+	DEFB	XP22-$-1
+XP22:	CALL	EXPR3		; 1ST <EXPR3>
+XP23:	CALL TSTC		; ADD?
+	DEFB	'+'
+	DEFB	XP25-$-1
+	PUSH	HL		; YES, SAVE VALUE
+	CALL	EXPR3		; GET 2ND <EXPR3>
+XP24:	EX	DE,HL		; 2ND IN DE
+	EX	(SP),HL		; 1ST IN HL
+	LD	A,H		; COMPARE SIGN
+	XOR	D
+	LD	A,D
+	ADD	HL,DE
+	POP	DE		; RESTORE TEXT POINTER
+	JP	M,XP23		; 1ST AND 2ND SIGN DIFFER
+	XOR	H		; 1ST AND 2ND SIGN EQUAL
+	JP	P,XP23		; SO IS RESULT
+	JP	QHOW		; ELSE WE HAVE OVERFLOW
+XP25:	CALL TSTC		; SUBTRACT?
+	DEFB	'-'
+	DEFB	XP42-$-1
+XP26:	PUSH	HL		; YES, SAVE 1ST <EXPR3>
+	CALL	EXPR3		; GET 2ND <EXPR3>
+	CALL	CHGSGN		; NEGATE
+	JP	XP24		; AND ADD THEM
+;
+EXPR3:	CALL	EXPR4		; GET 1ST <EXPR4>
+XP31:	CALL TSTC		; MULTIPLY?
+	DEFB	'*'
+	DEFB	XP34-$-1
+	PUSH	HL		; YES, SAVE 1ST
+	CALL	EXPR4		; AND GET 2ND <EXPR4>
+	LD	B,0H		; CLEAR B FOR SIGN
+	CALL	CHKSGN		; CHECK SIGN
+	EX	(SP),HL		; 1ST IN HL
+	CALL	CHKSGN		; CHECK SIGN OF 1ST
+	EX	DE,HL
+	EX	(SP),HL
+	LD	A,H		; IS HL > 255 ?
+	OR	A
+	JP	Z,XP32		; NO
+	LD	A,D		; YES, HOW ABOUT DE
+	OR	D
+	EX	DE,HL		; PUT SMALLER IN HL
+	JP	NZ,AHOW		; ALSO >, WILL OVERFLOW
+XP32:	LD	A,L		; THIS IS DUMB
+	LD	HL,0H		; CLEAR RESULT
+	OR	A		; ADD AND COUNT
+	JP	Z,XP35
+XP33:	ADD	HL,DE
+	JP	C,AHOW		; OVERFLOW
+	DEC	A
+	JP	NZ,XP33
+	JP	XP35		; FINISHED
+XP34:	CALL TSTC		; DIVIDE?
+	DEFB	'/'
+	DEFB	XP42-$-1
+	PUSH	HL		; YES, SAVE 1ST <EXPR4>
+	CALL	EXPR4		; AND GET THE SECOND ONE
+	LD	B,0H		; CLEAR B FOR SIGN
+	CALL	CHKSGN		; CHECK SIGN OF 2ND
+	EX	(SP),HL		; GET 1ST IN HL
+	CALL	CHKSGN		; CHECK SIGN OF 1ST
+	EX	DE,HL
+	EX	(SP),HL
+	EX	DE,HL
+	LD	A,D		; DIVIDE BY 0?
+	OR	E
+	JP	Z,AHOW		; SAY "HOW?"
+	PUSH	BC		; ELSE SAVE SIGN
+	CALL	DIVIDE		; USE SUBROUTINE
+	LD	H,B		; RESULT IN HL NOW
+	LD	L,C
+	POP	BC		; GET SIGN BACK
+XP35:	POP	DE		; AND TEXT POINTER
+	LD	A,H		; HL MUST BE +
+	OR	A
+	JP	M,QHOW		; ELSE IT IS OVERFLOW
+	LD	A,B
+	OR	A
+	CALL	M,CHGSGN	; CHANGE SIGN IF NEEDED
+	JP	XP31		; LOOK FOR MORE TERMS
+;
+EXPR4:	LD	HL,TAB4-1	; FIND FUNCTION IN TAB4
+	JP	EXEC		; AND GO DO IT
+XP40:	CALL TSTV		; NO, NOT A FUNCTION
+	JP	C,XP41		; NOR A VARIABLE
+	LD	A,(HL)		; VARIABLE
+	INC	HL
+	LD	H,(HL)		; VALUE IN HL
+	LD	L,A
+	RET
+XP41:	CALL	TSTNUM		; OR IS IT A NUMBER
+	LD	A,B		; # OF DIGIT
+	OR	A
+	RET	NZ		; OK
+PARN:	CALL TSTC
+	DEFB	'('
+	DEFB	XP43-$-1
+	CALL EXPR		; "(EXPR)"
+	CALL TSTC
+	DEFB	')'
+	DEFB	XP43-$-1
+XP42:	RET
+XP43:	JP	QWHAT		; ELSE SAY: "WHAT?"
+;
+RND:	CALL	PARN		; *** RND(EXPR) ***
+	LD	A,H		; EXPR MUST BE +
+	OR	A
+	JP	M,QHOW
+	OR	L		; AND NON-ZERO
+	JP	Z,QHOW
+	PUSH	DE		; SAVE BOTH
+	PUSH	HL
+	LD	HL,(RANPNT)	; GET MEMORY AS RANDOM
+	LD	DE,LSTROM	; NUMBER
+	CALL COMP
+	JP	C,RA1		; WRAP AROUND IF LAST
+	LD	HL,START
+RA1:	LD	E,(HL)
+	INC	HL
+	LD	D,(HL)
+	LD	(RANPNT),HL
+	POP	HL
+	EX	DE,HL
+	PUSH	BC
+	CALL	DIVIDE		; RND(N)=MOD(M,N)+1
+	POP	BC
+	POP	DE
+	INC	HL
+	RET
+;
+ABS:	CALL	PARN		; *** ABS(EXPR) ***
+	DEC	DE
+	CALL	CHKSGN		; CHECK SIGN
+	INC	DE
+	RET
+;
+SIZE:	LD	HL,(TXTUNF)	; *** SIZE ***
+	PUSH	DE		; GET THE NUMBER OF FREE
+	EX	DE,HL		; BYTES BETWEEN 'TXTUNF'
+	LD	HL,VARBGN	; AND 'VARBGN'
+	CALL	SUBDE
+	POP	DE
+	RET
+;
+;*************************************************************
+;
+; *** DIVIDE *** SUBDE *** CHKSGN *** CHGSGN *** & CKHLDE ***
+;
+; 'DIVIDE' DIVIDES HL BY DE, RESULT IN BC, REMAINDER IN HL
+;
+; 'SUBDE' SUBSTRACTS DE FROM HL
+;
+; 'CHKSGN' CHECKS SIGN OF HL.  IF +, NO CHANGE.  IF -, CHANGE
+; SIGN AND FLIP SIGN OF B.
+;
+; 'CHGSGN' CHECKS SIGN N OF HL AND B UNCONDITIONALLY.
+;
+; 'CKHLDE' CHECKS SIGN OF HL AND DE.  IF DIFFERENT, HL AND DE
+; ARE INTERCHANGED.  IF SAME SIGN, NOT INTERCHANGED.  EITHER
+; CASE, HL DE ARE THEN COMPARED TO SET THE FLAGS.
+;
+DIVIDE:	PUSH	HL		; *** DIVIDE ***
+	LD	L,H		; DIVIDE H BY DE
+	LD	H,0
+	CALL	DV1
+	LD	B,C		; SAVE RESULT IN B
+	LD	A,L		; (REMINDER+L)/DE
+	POP	HL
+	LD	H,A
+DV1:	LD	C,0FFH		; RESULT IN C
+DV2:	INC	C		; DUMB ROUTINE
+	CALL	SUBDE		; DIVIDE BY SUBTRACT
+	JP	NC,DV2		; AND COUNT
+	ADD	HL,DE
+	RET
+;
+SUBDE:	LD	A,L		; *** SUBDE ***
+	SUB	E		; SUBSTRACT DE FROM
+	LD	L,A		; HL
+	LD	A,H
+	SBC	A,D
+	LD	H,A
+	RET
+;
+CHKSGN:	LD	A,H		; *** CHKSGN ***
+	OR	A		; CHECK SIGN OF HL
+	RET	P		; IF -, CHANGE SIGN
+;
+CHGSGN:	LD	A,H		; *** CHGSGN ***
+	PUSH	AF
+	CPL			; CHANGE SIGN OF HL
+	LD	H,A
+	LD	A,L
+	CPL
+	LD	L,A
+	INC	HL
+	POP	AF
+	XOR	H
+	JP	P,QHOW
+	LD	A,B		; AND ALSO FLIP B
+	XOR	80H
+	LD	B,A
+	RET
+;
+CKHLDE:	LD	A,H
+	XOR	D		; SAME SIGN?
+	JP	P,CK1		; YES, COMPARE
+	EX	DE,HL		; NO, XCH AND COMP
+CK1:	CALL COMP
+	RET
+;
+;*************************************************************
+;
+; *** SETVAL *** FIN *** ENDCHK *** & ERROR (& FRIENDS) ***
+;
+; "SETVAL" EXPECTS A VARIABLE, FOLLOWED BY AN EQUAL SIGN AND
+; THEN AN EXPR.  IT EVALUATES THE EXPR. AND SET THE VARIABLE
+; TO THAT VALUE.
+;
+; "FIN" CHECKS THE END OF A COMMAND.  IF IT ENDED WITH ";",
+; EXECUTION CONTINUES.  IF IT ENDED WITH A CR, IT FINDS THE
+; NEXT LINE AND CONTINUE FROM THERE.
+;
+; "ENDCHK" CHECKS IF A COMMAND IS ENDED WITH CR.  THIS IS
+; REQUIRED IN CERTAIN COMMANDS.  (GOTO, RETURN, AND STOP ETC.)
+;
+; "ERROR" PRINTS THE STRING POINTED BY DE (AND ENDS WITH CR).
+; IT THEN PRINTS THE LINE POINTED BY 'CURRNT' WITH A "?"
+; INSERTED AT WHERE THE OLD TEXT POINTER (SHOULD BE ON TOP
+; OF THE STACK) POINTS TO.  EXECUTION OF TB IS STOPPED
+; AND TBI IS RESTARTED.  HOWEVER, IF 'CURRNT' -> ZERO
+; (INDICATING A DIRECT COMMAND), THE DIRECT COMMAND IS NOT
+; PRINTED.  AND IF 'CURRNT' -> NEGATIVE # (INDICATING 'INPUT'
+; COMMAND), THE INPUT LINE IS NOT PRINTED AND EXECUTION IS
+; NOT TERMINATED BUT CONTINUED AT 'INPERR'.
+;
+; RELATED TO 'ERROR' ARE THE FOLLOWING:
+; 'QWHAT' SAVES TEXT POINTER IN STACK AND GET MESSAGE "WHAT?"
+; 'AWHAT' JUST GET MESSAGE "WHAT?" AND JUMP TO 'ERROR'.
+; 'QSORRY' AND 'ASORRY' DO SAME KIND OF THING.
+; 'AHOW' AND 'AHOW' IN THE ZERO PAGE SECTION ALSO DO THIS.
+;
+SETVAL:	CALL TSTV		; *** SETVAL ***
+	JP	C,QWHAT		; "WHAT?" NO VARIABLE
+	PUSH	HL		; SAVE ADDRESS OF VAR.
+	CALL TSTC		; PASS "=" SIGN
+	DEFB	'='
+	DEFB	SV1-$-1
+	CALL EXPR		; EVALUATE EXPR.
+	LD	B,H		; VALUE IS IN BC NOW
+	LD	C,L
+	POP	HL		; GET ADDRESS
+	LD	(HL),C		; SAVE VALUE
+	INC	HL
+	LD	(HL),B
+	RET
+SV1:	JP	QWHAT		; NO "=" SIGN
+;
+FIN:	CALL TSTC		; *** FIN ***
+	DEFB	3BH
+	DEFB	FI1-$-1
+	POP	AF		; ";", PURGE RET. ADDR.
+	JP	RUNSML		; CONTINUE SAME LINE
+FI1:	CALL TSTC		; NOT ";", IS IT CR?
+	DEFB	CR
+	DEFB	FI2-$-1
+	POP	AF		; YES, PURGE RET. ADDR.
+	JP	RUNNXL		; RUN NEXT LINE
+FI2:	RET			; ELSE RETURN TO CALLER
+;
+ENDCHK:	CALL IGNBLK		; *** ENDCHK ***
+	CP	CR		; END WITH CR?
+	RET	Z		; OK, ELSE SAY: "WHAT?"
+;
+FINISH:  ; JC using CALLs instead of RST x.  Remove this comment when settled.
+	POP	AF		; *** FINISH/RST 6 ***
+	CALL	FIN		; CHECK END OF COMMAND
+;	JP	QWHAT		; PRINT "WHAT?" IF WRONG
+QWHAT:	PUSH	DE		; *** QWHAT ***
+AWHAT:	LD	DE,WHAT		; *** AWHAT ***
+ERROR:	SUB	A		; *** ERROR ***
+	CALL	PRTSTG		; PRINT 'WHAT?', 'HOW?'
+
+;JC REPORTING LINE BUFFER 	TEMPORARY
+;	push bc
+;	ld bc,BUFFTB
+;	call puthexword
+;	pop bc
+;end JC REPORTING LINE BUFFER
+;JC ADDING TEMPORARY (CHANGE LATER) WHAT report line in question
+;    LD DE,BUFFTB
+;    CALL PRTSTG  ; This didn't work because of no string termination but showed me zeroes at start
+;end JC ADDING TEMPORARY (CHANGE LATER) WHAT report line in question
+
+
+	POP	DE		; OR 'SORRY'
+	LD	A,(DE)		; SAVE THE CHARACTER
+	PUSH	AF		; AT WHERE OLD DE ->
+	SUB	A		; AND PUT A 0 THERE
+	LD	(DE),A
+	LD	HL,(CURRNT)	; GET CURRENT LINE #
+	PUSH	HL
+	LD	A,(HL)		; CHECK THE VALUE
+	INC	HL
+	OR	(HL)
+	POP	DE
+	JP	Z,RSTART	; IF ZERO, JUST RESTART
+	LD	A,(HL)		; IF NEGATIVE,
+	OR	A
+	JP	M,INPERR	; REDO INPUT
+	CALL	PRTLN		; ELSE PRINT THE LINE
+	DEC	DE		; UPTO WHERE THE 0 IS
+	POP	AF		; RESTORE THE CHARACTER
+	LD	(DE),A
+	LD	A,3FH		; PRINT A "?"
+	CALL OUTC
+	SUB	A		; AND THE REST OF THE
+	CALL	PRTSTG		; LINE
+	JP	RSTART		; THEN RESTART
+;
+QSORRY:	PUSH	DE		; *** QSORRY ***
+ASORRY:	LD	DE,SORRY	; *** ASORRY ***
+	JP	ERROR
+;
+;*************************************************************
+;
+; *** GETLN *** FNDLN (& FRIENDS) ***
+;
+; 'GETLN' READS A INPUT LINE INTO 'BUFFTB'.  IT FIRST PROMPT
+; THE CHARACTER IN A (GIVEN BY THE CALLER), THEN IT FILLS
+; THE BUFFER AND ECHOS.  IT IGNORES LF'S AND NULLS, BUT STILL
+; ECHOS THEM BACK.  RUB-OUT IS USED TO CAUSE IT TO DELETE
+; THE LAST CHARACTER (IF THERE IS ONE), AND ALT-MOD IS USED TO
+; CAUSE IT TO DELETE THE WHOLE LINE AND START IT ALL OVER.
+; CR SIGNALS THE END OF A LINE, AND CAUSE 'GETLN' TO RETURN.
+;
+; 'FNDLN' FINDS A LINE WITH A GIVEN LINE # (IN HL) IN THE
+; TEXT SAVE AREA.  DE IS USED AS THE TEXT POINTER.  IF THE
+; LINE IS FOUND, DE WILL POINT TO THE BEGINNING OF THAT LINE
+; (I.E., THE LOW BYTE OF THE LINE #), AND FLAGS ARE NC & Z.
+; IF THAT LINE IS NOT THERE AND A LINE WITH A HIGHER LINE #
+; IS FOUND, DE POINTS TO THERE AND FLAGS ARE NC & NZ.  IF
+; WE REACHED THE END OF TEXT SAVE AREA AND CANNOT FIND THE
+; LINE, FLAGS ARE C & NZ.
+; 'FNDLN' WILL INITIALIZE DE TO THE BEGINNING OF THE TEXT SAVE
+; AREA TO START THE SEARCH.  SOME OTHER ENTRIES OF THIS
+; ROUTINE WILL NOT INITIALIZE DE AND DO THE SEARCH.
+; 'FNDLNP' WILL START WITH DE AND SEARCH FOR THE LINE #.
+; 'FNDNXT' WILL BUMP DE BY 2, FIND A CR AND THEN START SEARCH.
+; 'FNDSKP' USE DE TO FIND A CR, AND THEN START SEARCH.
+;
+; 2019-09-14 JC frustrated with this portion.  Trying chin.  TEMPORARY
+;GETLN:			    ; *** GETLN ***
+;   CALL OUTC   	; PROMPT AND 
+;   LD	DE,BUFFTB	;  INIT.
+;GL1:
+;    	CALL	CHKIO		; CHECK KEYBOARD
+;	JP	Z,GL1		; NO INPUT, WAIT
+; JC TEMPORARY GETLN SUBSTITUTION Is next few lines.
+; If this doens't work, problem is deeper.  JC
+GETLN:       
+GL1:         
+          CALL   chin   
+             ; END JC TEMPORARY GETLN SUBSTITUTION Is next few lines.
+	CP	7FH		; DELETE LAST CHARACTER?
+	JP	Z,GL3		; YES
+	CP	08H		; BACKSPACE LAST CHARACTER? ;JC ADDING BACKSPACE (In addition to DEL)
+	JP	Z,GL3		; YES
+	CALL OUTC		; INPUT, ECHO BACK
+	CP	0AH		; IGNORE LF
+	JP	Z,GL1
+	OR	A		; IGNORE NULL
+	JP	Z,GL1
+	CP	7DH		; DELETE THE WHOLE LINE?
+	JP	Z,GL4		; YES
+	LD	(DE),A		; ELSE SAVE INPUT
+
+;JC REPORTING LINE BUFFER 	TEMPORARY
+;	push af
+;	push bc
+;	ld b,a
+;	ld a,'['
+;   call MONOUT
+;	ld a,b
+;   call MONOUT
+;	ld a,'>'
+;   call MONOUT
+;	ld bc,DE
+;	call puthexword
+;   call MONOUT
+;	ld a,']'
+;	pop bc
+;	pop af
+;end JC REPORTING LINE BUFFER 	TEMPORARY
+
+
+	INC	DE		; AND BUMP POINTER
+; JC ADDING CR TERMINATOR for printability... TEMPORARY REMOVE LATER
+; MAY WANT TO INCLUDE THIS
+;    push af
+;    ld a,CR
+;    ld (DE),a
+;    pop af
+; end JC ADDING CR TERMINATOR for printability... TEMPORARY REMOVE LATER
+
+	CP	0DH		; WAS IT CR?
+	RET	Z		; YES, END OF LINE
+	LD	A,E		; ELSE MORE FREE ROOM?
+	; JC HARDHAT AREA THIS WILL NEED TO BE CHANGED BECAUSE NOT ON BYTE BOUNDARY
+	; IT WILL FAIL IF THE BUFFER STRADDLES PAGE BOUNDARY (JC RELOCATING)
+	CP	BUFEND & 0FFH
+             ;JC TEMPORARY:
+          JP   z,apl_code_normal_start   ; JC let this be a fatal error, don't type 64 chars
+	JP	NZ,GL1		; YES, GET NEXT INPUT
+GL3:	LD	A,E		; DELETE LAST CHARACTER
+	CP	BUFFTB & 0FFH	; BUT DO WE HAVE ANY?
+	JP	Z,GL4		; NO, REDO WHOLE LINE
+	DEC	DE		; YES, BACKUP POINTER
+	LD	A,5CH		; AND ECHO A BACK-SLASH
+	CALL OUTC
+	JP	GL1		; GO GET NEXT INPUT
+GL4:	CALL	CRLF		; REDO ENTIRE LINE
+	LD	A,05EH		; CR, LF AND UP-ARROW
+	JP	GETLN
+;
+FNDLN:	LD	A,H		; *** FNDLN ***
+	OR	A		; CHECK SIGN OF HL
+	JP	M,QHOW		; IT CANNOT BE -
+	LD	DE,TXTBGN	; INIT TEXT POINTER
+;
+FNDLP:				; *** FDLNP ***
+FL1:	PUSH	HL		; SAVE LINE #
+	LD	HL,(TXTUNF)	; CHECK IF WE PASSED END
+	DEC	HL
+	CALL COMP
+	POP	HL		; GET LINE # BACK
+	RET	C		; C,NZ PASSED END
+	LD	A,(DE)		; WE DID NOT, GET BYTE 1
+	SUB	L		; IS THIS THE LINE?
+	LD	B,A		; COMPARE LOW ORDER
+	INC	DE
+	LD	A,(DE)		; GET BYTE 2
+	SBC	A,H		; COMPARE HIGH ORDER
+	JP	C,FL2		; NO, NOT THERE YET
+	DEC	DE		; ELSE WE EITHER FOUND
+	OR	B		; IT, OR IT IS NOT THERE
+	RET			; NC,Z:FOUND, NC,NZ:NO
+;
+FNDNXT:				; *** FNDNXT ***
+	INC	DE		; FIND NEXT LINE
+FL2:	INC	DE		; JUST PASSED BYTE 1 & 2
+;
+FNDSKP:	LD	A,(DE)		; *** FNDSKP ***
+	CP	CR		; TRY TO FIND CR
+	JP	NZ,FL2		; KEEP LOOKING
+	INC	DE		; FOUND CR, SKIP OVER
+	JP	FL1		; CHECK IF END OF TEXT
+;
+;*************************************************************
+;
+; *** PRTSTG *** QTSTG *** PRTNUM *** & PRTLN ***
+;
+; 'PRTSTG' PRINTS A STRING POINTED BY DE.  IT STOPS PRINTING
+; AND RETURNS TO CALLER WHEN EITHER A CR IS PRINTED OR WHEN
+; THE NEXT BYTE IS THE SAME AS WHAT WAS IN A (GIVEN BY THE
+; CALLER).  OLD A IS STORED IN B, OLD B IS LOST.
+;
+; 'QTSTG' LOOKS FOR A BACK-ARROW, SINGLE QUOTE, OR DOUBLE
+; QUOTE.  IF NONE OF THESE, RETURN TO CALLER.  IF BACK-ARROW,
+; OUTPUT A CR WITHOUT A LF.  IF SINGLE OR DOUBLE QUOTE, PRINT
+; THE STRING IN THE QUOTE AND DEMANDS A MATCHING UNQUOTE.
+; AFTER THE PRINTING THE NEXT 3 BYTES OF THE CALLER IS SKIPPED
+; OVER (USUALLY A JUMP INSTRUCTION.
+;
+; 'PRTNUM' PRINTS THE NUMBER IN HL.  LEADING BLANKS ARE ADDED
+; IF NEEDED TO PAD THE NUMBER OF SPACES TO THE NUMBER IN C.
+; HOWEVER, IF THE NUMBER OF DIGITS IS LARGER THAN THE # IN
+; C, ALL DIGITS ARE PRINTED ANYWAY.  NEGATIVE SIGN IS ALSO
+; PRINTED AND COUNTED IN, POSITIVE SIGN IS NOT.
+;
+; 'PRTLN' PRINTS A SAVED TEXT LINE WITH LINE # AND ALL.
+;
+PRTSTG:	LD	B,A		; *** PRTSTG ***
+PS1:	LD	A,(DE)		; GET A CHARACTER
+	INC	DE		; BUMP POINTER
+	CP	B		; SAME AS OLD A?
+	RET	Z		; YES, RETURN
+	CALL OUTC		; ELSE PRINT IT
+	CP	CR		; WAS IT A CR?
+	JP	NZ,PS1		; NO, NEXT
+	RET			; YES, RETURN
+;
+QTSTG:	CALL TSTC		; *** QTSTG ***
+	DEFB	22h  ; QUOTE '"'
+	DEFB	QT3-$-1
+	LD	A,22H		; IT IS A "
+QT1:	CALL	PRTSTG		; PRINT UNTIL ANOTHER
+	CP	CR		; WAS LAST ONE A CR?
+	POP	HL		; RETURN ADDRESS
+	JP	Z,RUNNXL	; WAS CR, RUN NEXT LINE
+QT2:	INC	HL		; SKIP 3 BYTES ON RETURN
+	INC	HL
+	INC	HL
+	JP	(HL)		; RETURN
+QT3:	CALL TSTC		; IS IT A '?
+	DEFB	27H
+	DEFB	QT4-$-1
+	LD	A,27H		; YES, DO THE SAME
+	JP	QT1		; AS IN "
+QT4:	CALL TSTC		; IS IT BACK-ARROW?
+	DEFB	5FH
+	DEFB	QT5-$-1
+	LD	A,08DH		; YES, CR WITHOUT LF
+	CALL OUTC		; DO IT TWICE TO GIVE
+	CALL OUTC		; TTY ENOUGH TIME
+	POP	HL		; RETURN ADDRESS
+	JP	QT2
+QT5:	RET			; NONE OF ABOVE
+;
+PRTNUM:	LD	B,0		; *** PRTNUM ***
+	CALL	CHKSGN		; CHECK SIGN
+	JP	P,PN1		; NO SIGN
+	LD	B,'-'		; B=SIGN
+	DEC	C		; '-' TAKES SPACE
+PN1:	PUSH	DE		; SAVE
+	LD	DE,0AH		; DECIMAL
+	PUSH	DE		; SAVE AS A FLAG
+	DEC	C		; C=SPACES
+	PUSH	BC		; SAVE SIGN & SPACE
+PN2:	CALL	DIVIDE		; DIVIDE HL BY 10
+	LD	A,B		; RESULT 0?
+	OR	C
+	JP	Z,PN3		; YES, WE GOT ALL
+	EX	(SP),HL		; NO, SAVE REMAINDER
+	DEC	L		; AND COUNT SPACE
+	PUSH	HL		; HL IS OLD BC
+	LD	H,B		; MOVE RESULT TO BC
+	LD	L,C
+	JP	PN2		; AND DIVIDE BY 10
+PN3:	POP	BC		; WE GOT ALL DIGITS IN
+PN4:	DEC	C		; THE STACK
+	LD	A,C		; LOOK AT SPACE COUNT
+	OR	A
+	JP	M,PN5		; NO LEADING BLANKS
+	LD	A,20H		; LEADING BLANKS
+	CALL OUTC
+	JP	PN4		; MORE?
+PN5:	LD	A,B		; PRINT SIGN
+	OR	A
+	CALL	NZ,10H
+	LD	E,L		; LAST REMAINDER IN E
+PN6:	LD	A,E		; CHECK DIGIT IN E
+	CP	0AH		; 10 IS FLAG FOR NO MORE
+	POP	DE
+	RET	Z		; IF SO, RETURN
+	ADD	A,30H		; ELSE CONVERT TO ASCII
+	CALL OUTC		; AND PRINT THE DIGIT
+	JP	PN6		; GO BACK FOR MORE
+;
+PRTLN:	LD	A,(DE)		; *** PRTLN ***
+	LD	L,A		; LOW ORDER LINE #
+	INC	DE
+	LD	A,(DE)		; HIGH ORDER
+	LD	H,A
+	INC	DE
+	LD	C,4H		; PRINT 4 DIGIT LINE #
+	CALL	PRTNUM
+	LD	A,20H		; FOLLOWED BY A BLANK
+	CALL OUTC
+	SUB	A		; AND THEN THE NEXT
+	CALL	PRTSTG
+	RET
+;
+;*************************************************************
+;
+; *** MVUP *** MVDOWN *** POPA *** & PUSHA ***
+;
+; 'MVUP' MOVES A BLOCK UP FROM WHERE DE-> TO WHERE BC-> UNTIL
+; DE = HL
+;
+; 'MVDOWN' MOVES A BLOCK DOWN FROM WHERE DE-> TO WHERE HL->
+; UNTIL DE = BC
+;
+; 'POPA' RESTORES THE 'FOR' LOOP VARIABLE SAVE AREA FROM THE
+; STACK
+;
+; 'PUSHA' STACKS THE 'FOR' LOOP VARIABLE SAVE AREA INTO THE
+; STACK
+;
+MVUP:	CALL COMP		; *** MVUP ***
+	RET	Z		; DE = HL, RETURN
+	LD	A,(DE)		; GET ONE BYTE
+	LD	(BC),A		; MOVE IT
+	INC	DE		; INCREASE BOTH POINTERS
+	INC	BC
+	JP	MVUP		; UNTIL DONE
+;
+MVDOWN:	LD	A,B		; *** MVDOWN ***
+	SUB	D		; TEST IF DE = BC
+	JP	NZ,MD1		; NO, GO MOVE
+	LD	A,C		; MAYBE, OTHER BYTE?
+	SUB	E
+	RET	Z		; YES, RETURN
+MD1:	DEC	DE		; ELSE MOVE A BYTE
+	DEC	HL		; BUT FIRST DECREASE
+	LD	A,(DE)		; BOTH POINTERS AND
+	LD	(HL),A		; THEN DO IT
+	JP	MVDOWN		; LOOP BACK
+;
+POPA:	POP	BC		; BC = RETURN ADDR.
+	POP	HL		; RESTORE LOPVAR, BUT
+	LD	(LOPVAR),HL	; =0 MEANS NO MORE
+	LD	A,H
+	OR	L
+	JP	Z,PP1		; YEP, GO RETURN
+	POP	HL		; NOP, RESTORE OTHERS
+	LD	(LOPINC),HL
+	POP	HL
+	LD	(LOPLMT),HL
+	POP	HL
+	LD	(LOPLN),HL
+	POP	HL
+	LD	(LOPPT),HL
+PP1:	PUSH	BC		; BC = RETURN ADDR.
+	RET
+;
+PUSHA:	LD	HL,STKLMT	; *** PUSHA ***
+	CALL	CHGSGN
+	POP	BC		; BC=RETURN ADDRESS
+	ADD	HL,SP		; IS STACK NEAR THE TOP?
+	JP	NC,QSORRY	; YES, SORRY FOR THAT
+	LD	HL,(LOPVAR)	; ELSE SAVE LOOP VAR'S
+	LD	A,H		; BUT IF LOPVAR IS 0
+	OR	L		; THAT WILL BE ALL
+	JP	Z,PU1
+	LD	HL,(LOPPT)	; ELSE, MORE TO SAVE
+	PUSH	HL
+	LD	HL,(LOPLN)
+	PUSH	HL
+	LD	HL,(LOPLMT)
+	PUSH	HL
+	LD	HL,(LOPINC)
+	PUSH	HL
+	LD	HL,(LOPVAR)
+PU1:	PUSH	HL
+	PUSH	BC		; BC = RETURN ADDR.
+	RET
+;
+;*************************************************************
+;
+; *** OUTC *** & CHKIO ***
+;
+; THESE ARE THE ONLY I/O ROUTINES IN TBI.
+; 'OUTC' IS CONTROLLED BY A SOFTWARE SWITCH 'OCSW'.  IF OCSW=0
+; 'OUTC' WILL JUST RETURN TO THE CALLER.  IF OCSW IS NOT 0,
+; IT WILL OUTPUT THE BYTE IN A.  IF THAT IS A CR, A LF IS ALSO
+; SEND OUT.  ONLY THE FLAGS MAY BE CHANGED AT RETURN. ALL REG.
+; ARE RESTORED.
+;
+; 'CHKIO' CHECKS THE INPUT.  IF NO INPUT, IT WILL RETURN TO
+; THE CALLER WITH THE Z FLAG SET.  IF THERE IS INPUT, Z FLAG
+; IS CLEARED AND THE INPUT BYTE IS IN A.  HOWEVER, IF THE
+; INPUT IS A CONTROL-O, THE 'OCSW' SWITCH IS COMPLIMENTED, AND
+; Z FLAG IS RETURNED.  IF A CONTROL-C IS READ, 'CHKIO' WILL
+; RESTART TBI AND DO NOT RETURN TO THE CALLER.
+;
+;OUTC:  PUSH PSW                        ;THIS IS AT LOC. 10
+;       LDA  OCSW                       ;CHECK SOFTWARE SWITCH
+;       ORA  A
+INIT:
+; JC removing any "output control switch" code (OCSW) because
+; well it was a good idea for typerwiter terminals but I'm going
+; to say I don't need that right now.
+;   LD	(OCSW),A
+; JC REMOVING ALL CODE FOR 8251A UART, and ALL OUT CODE.
+;	LD	A,4EH		; Initialize 8251A UART -- 3 is status p
+;	OUT	(3),A		; 1 stop bit, no parity, 8-bit char, 16x baud
+;	LD	A,37H		; Enable receive and transmit
+;	OUT	(3),A
+; I would call ConfigureSerial if this was standalone.
+; But serial is already configured.
+    call ConfigureSerial
+             ;	LD	D,19H  ;JC reducing number of Linefeeds.
+             ;Looks like it was intended to clear the screen but I'll pass.
+	LD	D,1
+PATLOP:
+	CALL	CRLF
+	DEC	D
+	JP	NZ,PATLOP
+	SUB	A
+	LD	DE,MSG1
+	CALL    PRTSTG
+	LD	HL,START
+	LD	(RANPNT),HL
+	LD	HL,TXTBGN
+	LD	(TXTUNF),HL
+	JP	RSTART
+
+; JC REMOVING ALL CODE FOR 8251A UART, and ALL OUT CODE.
+CRLF:	LD	A,CR		; *** CRLF ***
+OUTC:  ; JC using CALLs instead of RST x.  Remove this comment when settled.
+;JC ADDING AND REMOVING CODE HERE FOR OUTPUT
+;	PUSH	AF		; *** OUTC OR RST 2 ***
+;	LD	A,(OCSW)	; PRINT CHARACTER ONLY (Hardware specific option?)
+;	OR	A		; IF OCSW SWITCH IS ON
+;    JP	NZ,OC3		; IT IS ON
+;	POP	AF		; IT IS OFF
+;	RET			; RESTORE AF AND RETURN
+;OC3:
+;JC ADDING AND REMOVING CODE HERE FOR OUTPUT
+;    IN	A,(3)		; Check status
+;	AND	1H		; STATUS BIT
+;	JP	Z,OC3		; NOT READY, WAIT
+;	POP	AF		; READY, GET OLD A BACK
+;JC ADDING AND REMOVING CODE HERE FOR OUTPUT
+    call MONOUT
+;	OUT	(2),A		; Out to data port
+	CP	CR		; WAS IT CR?
+	RET	NZ		; NO, FINISHED
+	LD	A,LF		; YES, WE SEND LF TOO
+;	CALL OUTC		; THIS IS RECURSIVE
+;JC MAKING IT NOT RECURSIVE HERE
+    CALL MONOUT
+	LD	A,CR		; GET CR BACK IN A
+	RET
+;
+CHKIO:
+;JC CHANGING to fit the style of Tinybasic input (non-blocking input)
+;    IN	A,(3)		; *** CHKIO ***
+;	NOP			; STATUS BIT FLIPPED?
+;	AND	2H		; MASK STATUS BIT
+
+;JC HAD TROUBLE WITH THIS CODE.
+    call chkio_surrogate ;jc adding
+; JC TEMPORARY DIAGNOSTIC REMOVE LATER:
+;    or a This probably made matters worse!  Just return the flags given.
+	RET	Z		; NOT READY, RETURN "Z"
+; JC GOING DIRECTLY TO CHARACTER INPUT, which blocks anyway.
+;	call chin  ;jc adding
+;	IN	A,(2)		; READY, READ DATA
+	AND	7FH		; MASK BIT 7 OFF
+	CP	0FH		; IS IT CONTROL-O?
+	JP	NZ,CI1		; NO, MORE CHECKING
+	LD	A,(OCSW)	; CONTROL-O FLIPS OCSW
+	CPL			; ON TO OFF, OFF TO ON
+	LD	(OCSW),A
+	JP	CHKIO		; GET ANOTHER INPUT
+CI1:	CP	3H		; IS IT CONTROL-C?
+	RET	NZ		; NO, RETURN "NZ"
+	JP	RSTART		; YES, RESTART TBI
+;
+MSG1:   DEFB	'TINY '
+	    DEFB	'BASIC'
+	    DEFB	' testing!'
+	    DEFB	CR
+	    DEFB	CR
+	    DEFB    LF,LF,LF,0
+	
+;
+;*************************************************************
+;
+; *** TABLES *** DIRECT *** & EXEC ***
+;
+; THIS SECTION OF THE CODE TESTS A STRING AGAINST A TABLE.
+; WHEN A MATCH IS FOUND, CONTROL IS TRANSFERED TO THE SECTION
+; OF CODE ACCORDING TO THE TABLE.
+;
+; AT 'EXEC', DE SHOULD POINT TO THE STRING AND HL SHOULD POINT
+; TO THE TABLE-1.  AT 'DIRECT', DE SHOULD POINT TO THE STRING.
+; HL WILL BE SET UP TO POINT TO TAB1-1, WHICH IS THE TABLE OF
+; ALL DIRECT AND STATEMENT COMMANDS.
+;
+; A '.' IN THE STRING WILL TERMINATE THE TEST AND THE PARTIAL
+; MATCH WILL BE CONSIDERED AS A MATCH.  E.G., 'P.', 'PR.',
+; 'PRI.', 'PRIN.', OR 'PRINT' WILL ALL MATCH 'PRINT'.
+;
+; THE TABLE CONSISTS OF ANY NUMBER OF ITEMS.  EACH ITEM
+; IS A STRING OF CHARACTERS WITH BIT 7 SET TO 0 AND
+; A JUMP ADDRESS STORED HI-LOW WITH BIT 7 OF THE HIGH
+; BYTE SET TO 1.
+;
+; END OF TABLE IS AN ITEM WITH A JUMP ADDRESS ONLY.  IF THE
+; STRING DOES NOT MATCH ANY OF THE OTHER ITEMS, IT WILL
+; MATCH THIS NULL ITEM AS DEFAULT.
+;
+TAB1:				; DIRECT COMMANDS
+	DEFB	'LIST'
+	DWA  LIST
+	DEFB	'RUN'
+	DWA  RUN
+	DEFB	'NEW'
+	DWA  NEW
+             ;JC added these things, but commenting for now.
+             ;	DEFB	"QUIT"
+             ;	DWA  QUIT
+             ;	DEFB	"EXIT"
+             ;	DWA  QUIT
+             ;	DEFB	"SYSTEM"
+             ;	DWA  QUIT
+;
+TAB2:				; DIRECT/STATEMENT
+	DEFB	'NEXT'
+	DWA  NEXT
+	DEFB	'LET'
+	DWA  LET
+	DEFB	'IF'
+	DWA  IFF
+	DEFB	'GOTO'
+	DWA  GOTO
+	DEFB	'GOSUB'
+	DWA  GOSUB
+	DEFB	'RETURN'
+	DWA  RETURN
+	DEFB	'REM'
+	DWA  REM
+	DEFB	'FOR'
+	DWA  FOR
+	DEFB	'INPUT'
+	DWA  INPUT
+	DEFB	'PRINT'
+	DWA  PRINT
+	DEFB	'STOP'
+	DWA  STOP
+	DWA  DEFLT
+;
+TAB4:				; FUNCTIONS
+	DEFB	'RND'
+	DWA  RND
+	DEFB	'ABS'
+	DWA  ABS
+	DEFB	'SIZE'
+	DWA  SIZE
+	DWA  XP40
+;
+TAB5:				; "TO" IN "FOR"
+	DEFB	'TO'
+	DWA  FR1
+	DWA  QWHAT
+;
+TAB6:				; "STEP" IN "FOR"
+	DEFB	'STEP'
+	DWA  FR2
+	DWA  FR3
+;
+TAB8:				; RELATION OPERATORS
+	DEFB	'>='
+	DWA  XP11
+	DEFB	'#'
+	DWA  XP12
+	DEFB	'>'
+	DWA  XP13
+	DEFB	'='
+	DWA  XP15
+	DEFB	'<='
+	DWA  XP14
+	DEFB	'<'
+	DWA  XP16
+	DWA  XP17
+;
+DIRECT:	LD	HL,TAB1-1	; *** DIRECT ***
+;
+EXEC:				; *** EXEC ***
+EX0:	CALL IGNBLK		; IGNORE LEADING BLANKS
+	PUSH	DE		; SAVE POINTER
+EX1:	LD	A,(DE)		; IF FOUND '.' IN STRING
+	INC	DE		; BEFORE ANY MISMATCH
+	CP	2EH		; WE DECLARE A MATCH
+	JP	Z,EX3
+	INC	HL		; HL->TABLE
+	CP	(HL)		; IF MATCH, TEST NEXT
+	JP	Z,EX1
+	LD	A,07FH		; ELSE SEE IF BIT 7
+	DEC	DE		; OF TABLE IS SET, WHICH
+	CP	(HL)		; IS THE JUMP ADDR. (HI)
+	JP	C,EX5		; C:YES, MATCHED
+EX2:	INC	HL		; NC:NO, FIND JUMP ADDR.
+	CP	(HL)
+	JP	NC,EX2
+	INC	HL		; BUMP TO NEXT TAB. ITEM
+	POP	DE		; RESTORE STRING POINTER
+	JP	EX0		; TEST AGAINST NEXT ITEM
+EX3:	LD	A,07FH		; PARTIAL MATCH, FIND
+EX4:	INC	HL		; JUMP ADDR., WHICH IS
+	CP	(HL)		; FLAGGED BY BIT 7
+	JP	NC,EX4
+EX5:	LD	A,(HL)		; LOAD HL WITH THE JUMP
+	INC	HL		; ADDRESS FROM THE TABLE
+	LD	L,(HL)
+	AND	7FH		; MASK OFF BIT 7
+	LD	H,A
+	POP	AF		; CLEAN UP THE GABAGE
+	JP	(HL)		; AND WE GO DO IT
+;
+LSTROM:				; ALL ABOVE CAN BE ROM ; JC that is a historical note, I may have variables up there
+;       ORG  1000H                      ;HERE DOWN MUST BE RAM
+; JC REMOVING ORG
+;       ORG	0800H
+.align 256
+OCSW:	DEFS	1		; SWITCH FOR OUTPUT
+CURRNT:	DEFS	2		; POINTS TO CURRENT LINE
+STKGOS:	DEFS	2		; SAVES SP IN 'GOSUB'
+VARNXT:	DEFS	2		; TEMP STORAGE
+STKINP:	DEFS	2		; SAVES SP IN 'INPUT'
+LOPVAR:	DEFS	2		; 'FOR' LOOP SAVE AREA
+LOPINC:	DEFS	2		; INCREMENT
+LOPLMT:	DEFS	2		; LIMIT
+LOPLN:	DEFS	2		; LINE NUMBER
+LOPPT:	DEFS	2		; TEXT POINTER
+RANPNT:	DEFS	2		; RANDOM NUMBER POINTER
+TXTUNF:	DEFS	2		; ->UNFILLED TEXT AREA
+TXTBGN:	DEFS	2		; TEXT SAVE AREA BEGINS
+;       ORG  1366H
+;       ORG  1F00H
+;JC REMOVING ORG
+;       ORG	0F00H		; For 2K RAM
+; JC ADDING DEFS 
+        DEFS    2048
+TXTEND:	DEFS	0		; TEXT SAVE AREA ENDS
+VARBGN:	DEFS	55		; VARIABLE @(0)
+.align   256   
+SKIP1B:   defs  1   
+BUFFTB:	DEFS	64		; INPUT BUFFER
+BUFEND:	DEFS	1		; BUFFER ENDS
+STKLMT:	DEFS	1		; TOP LIMIT FOR STACK (JC: "lower limit")
+;       ORG  1400H
+;       ORG  2000H
+;JC removing org
+;       ORG	1000H		; For 4K system -- 2k ROM, 2K RAM
+        DEFS 2048
+STACK:	DEFS	0		; STACK STARTS HERE
+;        DEFS 512 ;JC ADDING just in case.  Correction, stacks go downward...
+;
+;CR	EQU	0DH
+;LF	EQU	0AH
+;       END
+
+; JC END INSERTING TINYBASIC	
+; INSERTING DEBUGGER/MONITOR
+.align 0x100
+; from Cpuville: http://cpuville.com/Code/Z80.html 
+;RAM monitor for a system with serial interface and IDE disk and memory expansion board.
+;This program to be loaded by CP/M at 0100h, then it copies itself to memory at DC00h.
+;Assumes serial port has been initialized by ROM monitor.
+;NOT:Assumes the UART data port address is 02h and control/status address is 03h
+;Assumes memory configuration is all-RAM
+;JC HARTDHAT: The above line is from previous author and may represent a problem.
+;The subroutines use these variables in RAM, same area as ROM monitor:
+current_location:	equ	0xdb00		;word variable in RAM
+line_count:		equ	0xdb02		;byte variable in RAM
+byte_count:		equ	0xdb03		;byte variable in RAM
+value_pointer:		equ	0xdb04		;word variable in RAM
+current_value:		equ	0xdb06		;word variable in RAM
+buffer:			equ	0xdb08		;buffer in RAM -- up to stack area
+;Will use stack of calling program (CP/M) which is re-initialized at re-boot.
+;
+;
+;
+;Code to start program and move to higher memory
+;JC says THIS BIT RELOCATES THE MONITOR.  I won't be relocating it.
+;JC removing org.  It has to be after the previous org.
+;			org	0100h
+;
+;			ld	hl,code_origin	;start of code to transfer
+;			ld	bc,monitor_code_end-code_start+1	;length of code to transfer
+;			ld	de,0DC00h	;target of transfer
+;			ldir			;Z80 transfer instruction
+;			jp	0DC00h
+code_origin:					;address of first byte of code before transfer
+;	
+;JC removing org.  It has to be after the previous org.
+;			org	0DC00h
+code_start:		jp 	monitor_start			
+;
+;Puts a single char (byte value) on serial output
+;Call with char to send in A register. Uses B register
+;JC CHANGING.
+;write_char:		ld	b,a			;store char
+;write_char_loop:	in	a,(3)			;check if OK to send
+;			and	001h			;check TxRDY bit
+;			jp 	z,write_char_loop	;loop if not set
+;			ld 	a,b			;get char back
+;			out 	(2),a			;send to output
+;			ret				;returns with char in a
+;JC changing:
+write_char:
+    jp MONOUT
+
+;
+;Subroutine to write a zero-terminated string to serial output
+;Pass address of string in HL register
+;No error checking
+; JC CHANGING!  
+;write_string:
+;           in 	a,(3)			;read status
+;			and 	001h			;check TxRDY bit
+;			jp 	z,write_string		;loop if not set
+;			ld 	a,(hl)			;get char from string
+;			and 	a			;check if 0
+;			ret 	z			;yes, finished
+;			out 	(2),a			;no, write char to output
+;			inc 	hl			;next char in string
+;			jp 	write_string		;start over
+
+write_string:
+			ld 	a,(hl)			;get char from string
+			and 	a			;check if 0
+			ret 	z			;yes, finished
+			call MONOUT
+			inc 	hl			;next char in string
+			jp 	write_string		;start over
+
+;
+;Binary loader. Receive a binary file, place in memory.
+;Address of load passed in HL, length of load (= file length) in BC
+bload:      ;
+; JC CHANGING FOR THIS HARDWARE
+;            in 	a,(3)			;get status
+;			and 	002h			;check RxRDY bit
+;			jp 	z,bload			;not ready, loop
+;			in	a,(2)
+            call chin
+			ld	(hl),a
+			inc	hl
+			dec	bc			;byte counter
+			ld	a,b			;need to test BC this way because
+			or	c			;dec rp instruction does not change flags
+			jp	nz,bload
+			ret
+;
+;Binary dump to port. Send a stream of binary data from memory to serial output
+;Address of dump passed in HL, length of dump in BC
+bdump:		;
+; JC CHANGING FOR THIS HARDWARE
+;        	in 	a,(3)			;get status
+;			and 	001h			;check TxRDY bit
+;			jp 	z,bdump			;not ready, loop
+			ld	a,(hl)
+;			out	(2),a
+            call MONOUT
+			inc	hl
+			dec	bc
+			ld	a,b			;need to test this way because
+			or	c			;dec rp instruction does not change flags
+			jp	nz,bdump
+			ret
+;
+;Subroutine to get a string from serial input, place in buffer.
+;Buffer address passed in HL reg.
+;Uses A,BC,DE,HL registers (including calls to other subroutines).
+;Line entry ends by hitting return key. Return char not included in string (replaced by zero).
+;Backspace editing OK. No error checking.
+;
+get_line:		ld	c,000h			;line position
+			ld	a,h			;put original buffer address in de
+			ld	d,a			;after this don't need to preserve hl
+			ld	a,l			;subroutines called don't use de
+			ld	e,a
+get_line_next_char:
+;JC changing this code for serial in.
+;            in 	a,(3)			;get status
+;			and 	002h			;check RxRDY bit
+;			jp 	z,get_line_next_char	;not ready, loop
+;			in 	a,(2)			;get char
+            call chin
+			cp	00dh			;check if return
+			ret	z			;yes, normal exit
+			cp	07fh			;check if backspace (VT102 keys)
+			jp	z,get_line_backspace	;yes, jump to backspace routine
+			cp	008h			;check if backspace (ANSI keys)
+			jp	z,get_line_backspace	;yes, jump to backspace
+			call	write_char		;put char on screen
+			ld	(de),a			;store char in buffer
+			inc	de			;point to next space in buffer
+			inc	c			;inc counter
+			ld	a,000h
+			ld	(de),a			;leaves a zero-terminated string in buffer
+			jp	get_line_next_char
+get_line_backspace:	ld	a,c			;check current position in line
+			cp	000h			;at beginning of line?
+			jp	z,get_line_next_char	;yes, ignore backspace, get next char
+			dec	de			;no, erase char from buffer
+			dec	c			;back up one
+			ld	a,000h			;put a zero in buffer where the last char was
+			ld	(de),a
+			ld	hl,erase_char_string	;ANSI sequence to delete one char from line
+			call	write_string		;transmits sequence to backspace and erase char
+			jp	get_line_next_char
+;
+;Creates a two-char hex string from the byte value passed in register A
+;Location to place string passed in HL
+;String is zero-terminated, stored in 3 locations starting at HL
+;Also uses registers b,d, and e
+byte_to_hex_string:	ld	b,a			;store original byte
+			srl	a			;shift right 4 times, putting
+			srl	a			;high nybble in low-nybble spot
+			srl	a			;and zeros in high-nybble spot
+			srl	a
+			ld	d,000h			;prepare for 16-bit addition
+			ld	e,a			;de contains offset
+			push	hl			;temporarily store string target address
+			ld	hl,hex_char_table	;use char table to get high-nybble character
+			add	hl,de			;add offset to start of table
+			ld	a,(hl)			;get char
+			pop	hl			;get string target address
+			ld	(hl),a			;store first char of string
+			inc	hl			;point to next string target address
+			ld	a,b			;get original byte back from reg b
+			and	00fh			;mask off high-nybble
+			ld	e,a			;d still has 000h, now de has offset
+			push	hl			;temp store string target address
+			ld	hl,hex_char_table	;start of table
+			add	hl,de			;add offset
+			ld	a,(hl)			;get char
+			pop	hl			;get string target address
+			ld	(hl),a			;store second char of string
+			inc	hl			;point to third location
+			ld	a,000h			;zero to terminate string
+			ld	(hl),a			;store the zero
+			ret				;done
+;
+;Converts a single ASCII hex char to a nybble value
+;Pass char in reg A. Letter numerals must be upper case. ; JC changing this..
+;Return nybble value in low-order reg A with zeros in high-order nybble if no error.
+;Return 0ffh in reg A if error (char not a valid hex numeral).
+;Also uses b, c, and hl registers.
+; JC adjusted this to allow for lowercase.
+hex_char_to_nybble:	ld	hl,hex_char_table2
+			ld	b,21			;no. of valid characters in table - 1.
+			ld	c,0Ah			;will be nybble value
+hex_to_nybble_loop:	cp	(hl)			;character match here?
+			jp	z,hex_to_nybble_ok	;match found, exit
+			dec	b			;no match, check if at end of table
+			jp	m,hex_to_nybble_err	;table limit exceded, exit with error
+			inc	c			;still inside table, continue search
+			inc	hl
+			jp	hex_to_nybble_loop
+hex_to_nybble_ok:
+			ld	a,c			;put nybble value in a
+          		AND   0Fh  			;fix for upper/lower
+			ret
+hex_to_nybble_err:	ld	a,0ffh			;error value
+			ret
+HEX_CHAR_TABLE2:   defb  "abcdef"   ; For conversion from lowercase & uppercase
+HEX_CHAR_TABLE:   defb  "0123456789ABCDEF"   ;ASCII hex table, for conv. to hex
+;
+;Converts a hex character pair to a byte value
+;Called with location of high-order char in HL
+;If no error carry flag clear, returns with byte value in register A, and
+;HL pointing to next mem location after char pair.
+;If error (non-hex char) carry flag set, HL pointing to invalid char
+hex_to_byte:
+			ld	a,(hl)			;location of character pair
+			push	hl			;store hl (hex_char_to_nybble uses it)
+			call	hex_char_to_nybble
+			pop	hl			;returns with nybble value in a reg, or 0ffh if error
+			cp	0ffh			;non-hex character?
+			jp	z,hex_to_byte_err	;yes, exit with error
+			sla	a			;no, move low order nybble to high side
+			sla	a
+			sla	a
+			sla	a
+			ld	d,a			;store high-nybble
+			inc	hl			;get next character of the pair
+			ld	a,(hl)
+			push	hl			;store hl
+			call	hex_char_to_nybble
+			pop	hl
+			cp	0ffh			;non-hex character?
+			jp	z,hex_to_byte_err	;yes, exit with error
+			or	d			;no, combine with high-nybble
+			inc	hl			;point to next memory location after char pair
+			scf
+			ccf				;no-error exit (carry = 0)
+			ret
+hex_to_byte_err:	scf				;error, carry flag set
+			ret
+;
+;Subroutine to get a two-byte address from serial input.
+;Returns with address value in HL
+;Uses locations in RAM for buffer and variables
+address_entry:		ld	hl,buffer		;location for entered string
+			call	get_line		;returns with address string in buffer
+			ld	hl,buffer		;location of stored address entry string
+			call	hex_to_byte		;will get high-order byte first
+			jp	c, address_entry_error	;if error, jump
+			ld	(current_location+1),a	;store high-order byte, little-endian
+			ld	hl,buffer+2		;point to low-order hex char pair
+			call	hex_to_byte		;get low-order byte
+			jp	c, address_entry_error	;jump if error
+			ld	(current_location),a	;store low-order byte in lower memory
+			ld	hl,(current_location)	;put memory address in hl
+			ret
+address_entry_error:	ld	hl,address_error_msg
+			call	write_string
+			jp	address_entry
+;
+;Subroutine to get a decimal string, return a word value
+;Calls decimal_string_to_word subroutine
+decimal_entry:		ld	hl,buffer
+			call	get_line		;returns with DE pointing to terminating zero
+			ld	hl,buffer
+			call	decimal_string_to_word
+			ret	nc			;no error, return with word in hl
+			ld	hl,decimal_error_msg	;error, try again
+			call	write_string
+			jp	decimal_entry
+;
+;Subroutine to convert a decimal string to a word value
+;Call with address of string in HL, pointer to end of string in DE
+;Carry flag set if error (non-decimal char)
+;Carry flag clear, word value in HL if no error.
+decimal_string_to_word:	ld	b,d
+			ld	c,e			;use BC as string pointer
+			ld	(current_location),hl	;store addr. of start of buffer in RAM word variable
+			ld	hl,000h			;starting value zero
+			ld	(current_value),hl
+			ld	hl,decimal_place_value	;pointer to values
+			ld	(value_pointer),hl
+decimal_next_char:	dec	bc			;next char in string (moving right to left)
+			ld	hl,(current_location)	;check if at end of decimal string
+			scf				;get ready to subtract de from buffer addr.
+			ccf				;set carry to zero (clear)
+			sbc	hl,bc			;keep going if bc > or = hl (buffer address)
+			jp	c,decimal_continue	;borrow means bc > hl
+			jp	z,decimal_continue	;z means bc = hl
+			ld	hl,(current_value)	;return if de < buffer address (no borrow)
+			scf				;get value back from RAM variable
+			ccf
+			ret				;return with carry clear, value in hl
+decimal_continue:	ld	a,(bc)			;next char in string (right to left)
+			sub	030h			;ASCII value of zero char
+			jp	m,decimal_error		;error if char value less than 030h
+			cp	00ah			;error if byte value > or = 10 decimal
+			jp	p,decimal_error		;a reg now has value of decimal numeral
+			ld	hl,(value_pointer)	;get value to add an put in de
+			ld	e,(hl)			;little-endian (low byte in low memory)
+			inc	hl
+			ld	d,(hl)
+			inc	hl			;hl now points to next value
+			ld	(value_pointer),hl
+			ld	hl,(current_value)	;get back current value
+decimal_add:		dec	a			;add loop to increase total value
+			jp	m,decimal_add_done	;end of multiplication
+			add	hl,de
+			jp	decimal_add
+decimal_add_done:	ld	(current_value),hl
+			jp	decimal_next_char
+decimal_error:		scf
+			ret
+			jp	decimal_add
+decimal_place_value:	defw	1,10,100,1000,10000
+;
+;Memory dump
+;Displays a 256-byte block of memory in 16-byte rows.
+;Called with address of start of block in HL
+memory_dump:;
+    		ld	(current_location),hl	;store address of block to be displayed
+			ld	a,000h
+			ld	(byte_count),a		;initialize byte count
+			ld	(line_count),a		;initialize line count
+			jp	dump_new_line
+dump_next_byte:		ld	hl,(current_location)	;get byte address from storage,
+			ld	a,(hl)			;get byte to be converted to string
+			inc	hl			;increment address and
+			ld	(current_location),hl	;store back
+			ld	hl,buffer		;location to store string
+			call	byte_to_hex_string	;convert
+			ld	hl,buffer		;display string
+			call	write_string
+			ld	a,(byte_count)		;next byte
+			inc	a
+			jp	z,dump_done		;stop when 256 bytes displayed
+			ld	(byte_count),a		;not finished yet, store
+			ld	a,(line_count)		;end of line (16 characters)?
+			cp	00fh			;yes, start new line
+			jp	z,dump_new_line
+			inc	a			;no, increment line count
+			ld	(line_count),a
+			ld	a,020h			;print space
+			call	write_char
+			jp	dump_next_byte		;continue
+dump_new_line:		ld	a,000h			;reset line count to zero
+			ld	(line_count),a			
+			call	write_newline
+			ld	hl,(current_location)	;location of start of line
+			ld	a,h			;high byte of address
+			ld	hl, buffer
+			call	byte_to_hex_string	;convert
+			ld	hl,buffer
+			call	write_string		;write high byte
+			ld	hl,(current_location)
+			ld	a,l			;low byte of address
+			ld	hl, buffer
+			call	byte_to_hex_string	;convert
+			ld	hl,buffer
+			call	write_string		;write low byte
+			ld	a,020h			;space
+			call	write_char
+			jp	dump_next_byte		;now write 16 bytes
+dump_done:		ld	a,000h
+			ld	hl,buffer
+			ld	(hl),a			;clear buffer of last string
+			call	write_newline
+			ret
+;
+;Memory load
+;Loads RAM memory with bytes entered as hex characters
+;Called with address to start loading in HL
+;Displays entered data in 16-byte rows.
+memory_load:;
+    		ld	(current_location),hl
+			ld	hl,data_entry_msg
+			call	write_string
+			jp	load_new_line
+load_next_char:		call	get_char
+			cp	00dh			;return?
+			jp	z,load_done		;yes, quit
+			ld	(buffer),a
+			call	get_char
+			cp	00dh			;return?
+			jp	z,load_done		;yes, quit
+			ld	(buffer+1),a
+			ld	hl,buffer
+			call	hex_to_byte
+			jp	c,load_data_entry_error	;non-hex character
+			ld	hl,(current_location)	;get byte address from storage,
+			ld	(hl),a			;store byte
+			inc	hl			;increment address and
+			ld	(current_location),hl	;store back
+			ld	a,(buffer)
+			call	write_char
+			ld	a,(buffer+1)
+			call	write_char
+			ld	a,(line_count)		;end of line (16 characters)?
+			cp	00fh			;yes, start new line
+			jp	z,load_new_line
+			inc	a			;no, increment line count
+			ld	(line_count),a
+			ld	a,020h			;print space
+			call	write_char
+			jp	load_next_char		;continue
+load_new_line:		ld	a,000h			;reset line count to zero
+			ld	(line_count),a
+			call	write_newline
+			jp	load_next_char		;continue
+load_data_entry_error:	call	write_newline
+			ld	hl,data_error_msg
+			call	write_string
+			ret
+load_done:		call	write_newline
+			ret
+;
+;Get one ASCII character from the serial port.
+;Returns with char in A reg. No error checking.
+;get_char:		in 	a,(3)			;get status
+;			and 	002h			;check RxRDY bit
+;			jp 	z,get_char		;not ready, loop
+;			in 	a,(2)			;get char
+;			ret
+
+;JC CHANGING GET_CHAR:
+get_char:
+    jp chin;
+
+;
+;Subroutine to start a new line
+write_newline:
+            ld	a,00dh			;ASCII carriage return character
+			call	write_char
+			ld	a,00ah			;new line (line feed) character
+			call	write_char
+			ret
+;
+;Subroutine to read one disk sector (256 bytes)
+;Address to place data passed in HL
+;LBA bits 0 to 7 passed in C, bits 8 to 15 passed in B
+;LBA bits 16 to 23 passed in E
+disk_read:;
+            ret ;JC nullifying
+    
+
+rd_status_loop_1:	in	a,(0fh)		;check status
+			and	80h		;check BSY bit
+			jp	nz,rd_status_loop_1	;loop until not busy
+rd_status_loop_2:	in	a,(0fh)		;check	status
+			and	40h		;check DRDY bit
+			jp	z,rd_status_loop_2	;loop until ready
+			ld	a,01h		;number of sectors = 1
+			out	(0ah),a		;sector count register
+			ld	a,c
+			out	(0bh),a		;lba bits 0 - 7
+			ld	a,b
+			out	(0ch),a		;lba bits 8 - 15
+			ld	a,e
+			out	(0dh),a		;lba bits 16 - 23
+			ld	a,11100000b	;LBA mode, select drive 0
+			out	(0eh),a		;drive/head register
+			ld	a,20h		;Read sector command
+			out	(0fh),a
+rd_wait_for_DRQ_set:	in	a,(0fh)		;read status
+			and	08h		;DRQ bit
+			jp	z,rd_wait_for_DRQ_set	;loop until bit set
+rd_wait_for_BSY_clear:	in	a,(0fh)
+			and	80h
+			jp	nz,rd_wait_for_BSY_clear
+			in	a,(0fh)		;clear INTRQ
+read_loop:		in	a,(08h)		;get data
+			ld	(hl),a
+			inc	hl
+			in	a,(0fh)		;check status
+			and	08h		;DRQ bit
+			jp	nz,read_loop	;loop until cleared
+			ret
+;
+;Subroutine to write one disk sector (256 bytes)
+;Address of data to write to disk passed in HL
+;LBA bits 0 to 7 passed in C, bits 8 to 15 passed in B
+;LBA bits 16 to 23 passed in E
+disk_write:;
+            ret ;JC nullifying
+    
+
+wr_status_loop_1:	in	a,(0fh)		;check status
+			and	80h		;check BSY bit
+			jp	nz,wr_status_loop_1	;loop until not busy
+wr_status_loop_2:	in	a,(0fh)		;check	status
+			and	40h		;check DRDY bit
+			jp	z,wr_status_loop_2	;loop until ready
+			ld	a,01h		;number of sectors = 1
+			out	(0ah),a		;sector count register
+			ld	a,c
+			out	(0bh),a		;lba bits 0 - 7
+			ld	a,b
+			out	(0ch),a		;lba bits 8 - 15
+			ld	a,e
+			out	(0dh),a		;lba bits 16 - 23
+			ld	a,11100000b	;LBA mode, select drive 0
+			out	(0eh),a		;drive/head register
+			ld	a,30h		;Write sector command
+			out	(0fh),a
+wr_wait_for_DRQ_set:	in	a,(0fh)		;read status
+			and	08h		;DRQ bit
+			jp	z,wr_wait_for_DRQ_set	;loop until bit set			
+write_loop:		ld	a,(hl)
+			out	(08h),a		;write data
+			inc	hl
+			in	a,(0fh)		;read status
+			and	08h		;check DRQ bit
+			jp	nz,write_loop	;write until bit cleared
+wr_wait_for_BSY_clear:	in	a,(0fh)
+			and	80h
+			jp	nz,wr_wait_for_BSY_clear
+			in	a,(0fh)		;clear INTRQ
+			ret
+;
+;Strings used in subroutines
+length_entry_string:	db	"Enter length of file to load (decimal): ",0
+dump_entry_string:	db	"Enter no. of bytes to dump (decimal): ",0
+LBA_entry_string:	db	"Enter LBA (decimal, 0 to 65535): ",0
+erase_char_string:	db	008h,01bh,"[K",000h	;ANSI sequence for backspace, erase to end of line.
+address_entry_msg:	db	"Enter 4-digit hex address (use upper-case A through F): ",0
+address_error_msg:	db	"\r\nError: invalid hex character, try again: ",0
+data_entry_msg:		db	"Enter hex bytes, hit return when finished.\r\n",0
+data_error_msg:		db	"Error: invalid hex byte.\r\n",0
+decimal_error_msg:	db	"\r\nError: invalid decimal number, try again: ",0
+;
+;Simple monitor program for CPUville Z80 computer with serial interface.
+; JC CODE GOT REFORMATTED WHEN LOST/RECOVERED:
+             ; JC using this monitor in RAM, so these storage variables will be in RAM.
+STORE_AF:   defs  2   
+STORE_BC:   defs  2   
+STORE_DE:   defs  2   
+STORE_HL:   defs  2   
+STORE_SP:   defs  2   
+STORE_PC:   defs  2   
+             ;JC HARDHAT AREA RETURN HERE:
+EMPTY_SPACE:   defs  24   ; Prevent a crash if overrun during user entry.
+             ; Alternately, the above entry ca be put somewhere else.
+             ;JC HARDHAT AREA RETURN HERE^^
+CPU_8080_FLAGS:   EQU   0b00000001   ; First in the series?
+CPU_8085_FLAGS:   EQU   0b00000011   ; Not sure what is different about 8085, RETURN HERE
+CPU_Z80_FLAGS:   EQU   0b00000101   
+CPU_HD64180_FLAGS:   EQU   0b00001101   ; Enable MMU support.
+CPU_Z180_FLAGS:   EQU   0b00011101   ; Z180 has different serial port options at least.
+CPU_MMUFLAG:   EQU   0b00001000   
+CPU_16IOFLAG:   EQU   0b00001000   ; also represents 16-bit I/O opcodes and capability
+CPU_ID_MESSAGE:   defb  "CPU type is ",0   
+CPU_8080_NAME:   defb  "8080",0   
+CPU_8085_NAME:   defb  "8085",0   
+CPU_Z80_NAME:   defb  "Z80",0   
+CPU_HD64180_NAME:   defb  "HD64180",0   
+CPU_Z180_NAME:   defb  "Z80180",0   
+CPU_ID_FLAGS:   defb  1   
+CPU_IDSTRING_PTR:   defb  2   
+RST_CALL:   RST   0   ;Self-modifying code here, modifies this byte and calls it.
+          RET      
+RST_LIST:      
+          RST   0   ; I don't plan to use RST 0 but providing it anyway.
+          RST   8   ; aka RST 1
+          RST   10h   ; aka RST 2
+          RST   18h   
+          RST   20h   ; aka RST 2
+          RST   28h   
+          RST   30h   ; aka RST 2
+          RST   38h   
+ID_CPU:      
+             ; call id_cpu  JC NOT DOING THIS YET.  RETURN HERE
+             ; ASSUMING HD64180 for our purposes right now september 2019
+             ; NEED TO FIND CODE THAT IDENTIFIES THE CPU CLASS.
+          IF   DEBUG   
+          LD   a,CPU_Z80_flags   
+          LD   (CPU_ID_FLAGS),a   
+          LD   hl,CPU_Z80_name   
+          LD   (CPU_IDSTRING_PTR),hl   
+          ELSE      
+          LD   a,CPU_HD64180_flags   
+          LD   (CPU_ID_FLAGS),a   
+          LD   hl,CPU_HD64180_name   
+          LD   (CPU_IDSTRING_PTR),hl   
+          ENDIF      
+          RET      
+             ; JC FOUND THIS CODE by theevilmuffinofdoom, it is a step in the right direction:
+             ;---------------------------
+             ;https://www.reddit.com/r/osdev/comments/5lhvqq/how_do_you_differentiate_between_an_8080_and_z80/
+             ;---------------------------
+             ; Stack pointer should be set up before this!
+             ; set the zero flag but not sign flag, and clear the subtraction flag
+          LD   A,255   
+          INC   A   
+          PUSH   AF   
+          LD   HL,0   
+          ADD   HL,SP   ; can't load sp directly into hl for some reason
+             ; (HL) should now be flags register
+          LD   A,$82   ; mask off everything but bits 7 and 1
+          AND   (HL)   
+          CP   $80   
+          JP   Z,is_LR35902   ; zero flag was set and bit 1 was clear
+          CP   $0   
+          JP   Z,is_Z80   ; sign flag was not set and subtract bit was clear
+             ; else it must be 8080
+IS_8080:      
+             ; set some byte somewhere to indicate it is 8080
+          JP   end   
+IS_LR35902:      ; JC: DMG or Gameboy?
+             ; set some byte somewhere to indicate it is LR35902
+          JP   end   
+IS_Z80:      
+             ; set some byte somewhere to indicate it is Z80
+END:         
+          POP   AF   
+             ;---------------------------
+REPORT_CPU:      
+          LD   hl,CPU_ID_MESSAGE   
+          CALL   write_string   
+          LD   hl,(CPU_IDSTRING_PTR)   
+          CALL   write_string   
+          RET      
+             ;TEST CALLABLE FUNCTION
+         .align   256   
+TESTROUTINE:      
+          CALL   puthexbyte   
+          CALL   puthexword   
+          LD   a,12h   
+          LD   bc,3456h   
+          CP   14h   
+          RET      
+monitor_pre_start:
+             ; Store register state
+.if   1   
+          PUSH   AF   
+          LD   (STORE_BC),BC   
+          LD   (STORE_DE),DE   
+          LD   (STORE_HL),HL   
+          POP   BC   
+          LD   (STORE_AF),BC   
+          LD   BC,0   
+          LD   H,B   
+          LD   L,B   ; HL=0 NOW
+          ADD   HL,SP   ; HERE IS THE STACK ;this method is from TINY BASIC
+          LD   (STORE_SP),HL   
+             ;LD bc,(hl) ;This is the return PC, for what it's worth.
+          LD   c,(hl)   
+          INC   hl   
+          LD   b,(hl)   
+          LD   (STORE_PC),bc   
+.endif
+; END, JC CODE GOT REFORMATTED WHEN LOST/RECOVERED.
+
+          CALL   ConfigureSerial   ;Maybe this should be done locally for a sturdier monitor.
+            ld	hl,monitor_message
+			call	write_string
+          call   id_cpu   ; ASSUMES HD64180 for our purposes right now september 2019
+          call   REPORT_CPU   
+          call   write_newline   
+monitor_start:
+          CALL   report_regs   ; JC adding this stuff to report current running state
+            ld	hl,monitor_prompt
+			call	write_string
+			
+             ;routine program return here to avoid re-initialization of port
+		;	ld	a,03eh			;cursor symbol
+		;	call	write_char
+			ld	hl,buffer
+			call	get_line		;get monitor input string (command)
+			call	write_newline
+			call	parse			;interprets command, returns with address to jump to in HL
+			jp	(hl)
+;
+;Parses an input line stored in buffer for available commands as described in parse table.
+;Returns with address of jump to action for the command in HL
+parse:			ld	bc,parse_table		;bc is pointer to parse_table
+parse_start:		ld	a,(bc)			;get pointer to match string from parse table
+			ld	e,a
+			inc	bc
+			ld	a,(bc)			
+			ld	d,a			;de will is pointer to strings for matching
+			ld	a,(de)			;get first char from match string
+			or	000h			;zero?
+			jp	z,parser_exit		;yes, exit no_match
+			ld	hl,buffer		;no, parse input string 
+match_loop:		cp	(hl)			;compare buffer char with match string char
+			jp	nz,no_match		;no match, go to next match string
+			or	000h			;end of strings (zero)?
+			jp	z,parser_exit		;yes, matching string found
+			inc	de			;match so far, point to next char in match string
+			ld	a,(de)			;get next character from match string
+			inc	hl			;and point to next char in input string
+			jp	match_loop		;check for match
+no_match:		inc	bc			;skip over jump target to
+			inc	bc
+			inc	bc			;get address of next matching string
+			jp	parse_start
+parser_exit:		inc	bc			;skip to address of jump for match
+			ld	a,(bc)
+			ld	l,a
+			inc	bc
+			ld	a,(bc)
+			ld	h,a			;returns with jump address in hl
+			ret
+;
+;Actions to be taken on match
+;
+;Memory dump program
+;Input 4-digit hexadecimal address
+;Calls memory_dump subroutine
+dump_jump:		ld	hl,dump_message		;Display greeting
+			call	write_string
+			ld	hl,address_entry_msg	;get ready to get address
+			call	write_string
+			call	address_entry		;returns with address in HL
+                        ; call	write_newline   ;Is write_newline trashing the address entry?
+			call	memory_dump
+			jp	monitor_start
+;
+;Hex loader, displays formatted input
+load_jump:		ld	hl,load_message		;Display greeting
+			call	write_string		;get address to load
+			ld	hl,address_entry_msg	;get ready to get address
+			call	write_string
+			call	address_entry
+			call	write_newline
+			call	memory_load
+			jp	monitor_start
+;
+;Jump and run do the same thing: get an address and jump to it.
+run_jump:		ld	hl,run_message		;Display greeting
+			call	write_string
+			ld	hl,address_entry_msg	;get ready to get address
+			call	write_string
+			call	address_entry
+			jp	(hl)
+; JC CODE GOT REFORMATTED WHEN LOST/RECOVERED.
+A_TEXT:   defb  "REGS A:",0   
+F_TEXT:   defb  " FLAGS:",0   
+BC_TEXT:   defb  "BC:",0   
+DE_TEXT:   defb  " DE:",0   
+HL_TEXT:   defb  " HL:",0   
+SP_TEXT:   defb  " SP:",0   
+PC_TEXT:   defb  " PC:",0   ; PC has no meaning if we aren't an interactive debugger.
+SETREGS_ENTRY_MSG:   defb  "Enter registers as hex in form AAFFBBCCDDEEHHLLSSPP.\r\n"   
+	defb  "Use 00(?) for F if not reqd. \r\nDon't need SP and don't overrrun!\r\n",0   
+             ;SET ALL REGISTERS
+SETREGS_JUMP:      
+          CALL   report_regs   
+          LD   hl,setregs_entry_msg   
+          CALL   write_string   
+          LD   hl,STORE_AF   
+          LD   (current_location),hl   
+          CALL   memory_load   
+          CALL   regs_jump   
+             ; flow into regs report
+             ;REPORT the stored registers
+REGS_JUMP:      
+          CALL   report_regs   
+          JP   monitor_start   
+PUT1:        
+          LD   a,"1"   
+          CALL   MONOUT   
+          RET      
+PUT0:        
+          LD   a,"0"   
+          CALL   MONOUT   
+          RET      
+REPORT_REGS:      ; JC adding this.
+             ;1st line A, Flags as hex, and Flags as bits
+             ; Show A
+          CALL   CRLF   
+          LD   hl,A_text   
+          CALL   write_string   
+          LD   a,(STORE_AF)   
+          CALL   puthexbyte   
+             ; Show Flags byte as hex
+          LD   hl,F_text   
+          CALL   write_string   
+          LD   a,(STORE_AF+1)   
+          CALL   puthexbyte   
+          LD   a," "   ; Gonna print out the individual flags
+             ; WANT TO CHANGE THIS FOR INDIVIDUAL FLAG SYMBOLS AS APPROPRIATE
+          CALL   MONOUT   
+          LD   a,(STORE_AF+1)   
+          LD   b,a   
+          AND   0b10000000   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b01000000   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00100000   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00010000   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00001000   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00000100   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00000010   
+          CALL   nz,put1   
+          CALL   z,put0   
+          LD   a,b   
+          AND   0b00000001   
+          CALL   nz,put1   
+          CALL   z,put0   
+          CALL   CRLF   
+             ;2nd line BC, DE, HL, SP, PC
+          LD   hl,BC_text   
+          CALL   write_string   
+          LD   bc,(STORE_BC)   
+          CALL   puthexword   
+          LD   hl,DE_text   
+          CALL   write_string   
+          LD   bc,(STORE_DE)   
+          CALL   puthexword   
+          LD   hl,HL_text   
+          CALL   write_string   
+          LD   bc,(STORE_HL)   
+          CALL   puthexword   
+          LD   hl,SP_text   
+          CALL   write_string   
+          LD   bc,(STORE_SP)   
+          CALL   puthexword   
+          LD   hl,PC_text   ;This may be wrong!  Looking for the return PC at best.
+          CALL   write_string   
+          LD   bc,(STORE_PC)   
+          CALL   puthexword   
+          CALL   CRLF   
+          RET      
+             ;Call would take stored parameters for all registers and calls the function.
+             ; NOT implemented JC return here...
+CALL_JUMP:      
+          LD   hl,call_message   ;Display greeting
+          CALL   write_string   
+          LD   hl,address_entry_msg   ;get ready to get address
+          CALL   write_string   
+          CALL   address_entry   ; Get the target address from user
+          LD   (call_opcode+1),hl   ; Self-modifying code.
+          LD   bc,STORE_AF   
+          PUSH   bc   ; AF needed right before the call
+          LD   bc,STORE_BC   
+          LD   de,STORE_DE   
+          LD   hl,STORE_HL   ; get our return address
+          POP   af   ; AF was pushed above, need to do it last,
+             ; I think otherwise the flags may get clobbered
+CALL_OPCODE:      ; Need this address for self-modifying code.
+          CALL   00ffh   ; Self-modifying code; HL is put here to supply diff. HL
+          IF   1   
+          PUSH   AF   
+          LD   (STORE_BC),BC   
+          LD   (STORE_DE),DE   
+          LD   (STORE_HL),HL   
+          POP   BC   
+          LD   (STORE_AF),BC   
+          LD   BC,0   
+          LD   H,B   
+          LD   L,B   ; HL=0 NOW
+          ADD   HL,SP   ; HERE IS THE STACK ;this method is from TINY BASIC
+          LD   (STORE_SP),HL   
+             ;LD bc,(hl) ;This is the return PC, for what it's worth.
+          LD   c,(hl)   
+          INC   hl   
+          LD   b,(hl)   
+          LD   (STORE_PC),bc   
+          ENDIF      
+          CALL   report_regs   
+          JP   monitor_start   
+             ;rst calls RST of the kind requested, and with stored registers.
+             ; NOT implemented JC return here...
+RST_JUMP:   LD   hl,rst_message   ;Display greeting
+          CALL   write_string   
+          LD   hl,address_entry_msg   ;get ready to get address
+          CALL   write_string   
+          CALL   address_entry   
+RSTINS:   NOP      ; NOT DONE YET
+          JP   monitor_start   
+SHOWIO:      ; BC contains the address
+          PUSH   af   
+          LD   a,b   
+          OR   a   
+          JP   z,pagezeroonly   
+          LD   a,b   
+          CALL   puthexbyte   
+PAGEZEROONLY:      
+          LD   a,c   
+          CALL   puthexbyte   
+          LD   a,":"   
+          CALL   puthexbyte   
+          IN   a,(C)   
+          CALL   puthexbyte   
+          LD   a," "   
+          CALL   puthexbyte   
+          POP   af   
+          RET      
+INCMD_JUMP:   LD   hl,incmd_message   
+          CALL   write_string   
+          LD   bc,(STORE_BC)   
+          CALL   showio   
+          CALL   CRLF   
+          JP   monitor_start   
+RIGHTARROW:   defb  " -> ",0   
+OUTCMD_JUMP:   LD   hl,outcmd_message   
+          CALL   write_string   
+             ;            call puthexword
+             ;            ld a,":"
+             ;            call puthexbyte
+          LD   bc,(STORE_BC)   
+          CALL   showio   
+          LD   a,(STORE_AF)   
+          OUT   (C),a   
+          LD   hl,rightarrow   
+          CALL   write_string   
+          CALL   showio   
+          CALL   CRLF   
+          JP   monitor_start   
+MMU_JUMP:      ;Report MMU status
+             ;(38h) $60  CBR Common Base Register (external addr base of Common 1) ("high")
+             ;(39h) $60  BBR Bank Base Register  (external addr base of Bank Area ("middle")
+             ;(3Ah) $55 CBAR
+          LD   hl,mmu_message   
+          CALL   write_string   
+          in0a 038h
+          CALL   puthexbyte   
+          in0a 039h
+          CALL   puthexbyte   
+          in0a 03Ah
+          CALL   puthexbyte   
+          CALL   crlf   
+          JP   monitor_start   
+; END, JC CODE GOT REFORMATTED WHEN LOST/RECOVERED.
+             ; 
+;Help and ? do the same thing, display the available commands
+help_jump:		ld	hl,help_message
+			call	write_string
+			ld	bc,parse_table		;table with pointers to command strings
+help_loop:		ld	a,(bc)			;displays the strings for matching commands,
+			ld	l,a			;getting the string addresses from the
+			inc	bc			;parse table
+			ld	a,(bc)			;pass address of string to hl through a reg
+			ld	h,a
+			ld	a,(hl)			;hl now points to start of match string
+			or	000h			;exit if no_match string
+			jp	z,help_done
+			push	bc			;write_char uses b register
+			ld	a,020h			;space char
+			call	write_char
+			pop	bc
+			call	write_string		;writes match string
+			inc	bc			;pass over jump address in table
+			inc	bc
+			inc	bc
+			jp	help_loop
+help_done:		jp	monitor_start
+;
+;Binary file load. Need both address to load and length of file
+bload_jump:		ld	hl,bload_message
+			call	write_string
+			ld	hl,address_entry_msg
+			call	write_string
+			call	address_entry
+			call	write_newline
+			push	hl
+			ld	hl,length_entry_string
+			call	write_string
+			call	decimal_entry
+			ld	b,h
+			ld	c,l
+			ld	hl,bload_ready_message
+			call	write_string
+			pop	hl
+			call	bload
+			jp	monitor_start
+;
+;Binary memory dump. Need address of start of dump and no. bytes
+bdump_jump:		ld	hl,bdump_message
+			call	write_string
+			ld	hl,address_entry_msg
+			call	write_string
+			call	address_entry
+			call	write_newline
+			push	hl
+			ld	hl,dump_entry_string
+			call	write_string
+			call	decimal_entry
+			ld	b,h
+			ld	c,l
+			ld	hl,bdump_ready_message
+			call	write_string
+			call	get_char
+			pop	hl
+			call	bdump
+			jp	monitor_start
+;Disk read. Need memory address to place data, LBA of sector to read
+diskrd_jump:		ld	hl,diskrd_message
+			call	write_string
+			ld	hl,address_entry_msg
+			call	write_string
+			call	address_entry
+			call	write_newline
+			push	hl
+			ld	hl,LBA_entry_string
+			call	write_string
+			call	decimal_entry
+			ld	b,h
+			ld	c,l
+			ld	e,00h
+			pop	hl
+			call	disk_read
+			jp	monitor_start
+diskwr_jump:		ld	hl,diskwr_message
+			call	write_string
+			ld	hl,address_entry_msg
+			call	write_string
+			call	address_entry
+			call	write_newline
+			push	hl
+			ld	hl,LBA_entry_string
+			call	write_string
+			call	decimal_entry
+			ld	b,h
+			ld	c,l
+			ld	e,00h
+			pop	hl
+			call	disk_write
+			jp	monitor_start
+cpm_jump:		jp	0000h			;reboot CP/M
+QUIT_JUMP:   JP   apl_code_normal_start   ; Not sure which is better here, JP or RET.
+          RET      ;                        ; Not sure which is better here, JP or RET.
+             ; jp apl_code_normal_start is more likely to work,
+             ; because the stack could be corrupted.
+             ; However if the stack is corrupted, it may have extra items on it.
+             ; "QUIT" is decidedly "return to the parent program."
+             ; I think "EXIT" would be something to use if debugging, to resume a running program.
+;Prints message for no match to entered command
+no_match_jump:		ld	hl,no_match_message
+			call	write_string
+			ld	hl, buffer
+			call	write_string
+			jp	monitor_start
+;
+;Monitor data structures:
+;
+MONITOR_MESSAGE:   defb  "Donn Stewart CPUville Monitor w/JC Extensions\r\nType ? for command list.\r\n",0   
+MONITOR_PROMPT:   defb  "\r\nMonitor ready > ",0   
+NO_MATCH_MESSAGE:   defb  "? ",0   
+HELP_MESSAGE:   defb  "Commands implemented:\r\n",0   
+DUMP_MESSAGE:   defb  "Displays a 256-byte block of memory.\r\n",0   
+LOAD_MESSAGE:   defb  "Enter hex bytes starting at memory location.\r\n",0   
+run_message:		db	"Will jump to (execute) program at address entered.\r\n",0
+REGS_MESSAGE:   defb  "Reports the values of registers on hold.\r\n",0   
+CALL_MESSAGE:   defb  "Will call (execute) program at address entered,\r\n"   
+ defb  "with the provided parameters, and return.\r\n",0   
+RST_MESSAGE:   defb  "Will call the selected reset vector,\r\n"   
+ defb  "with the provided parameters, and return.\r\n",0   
+SETREGS_MESSAGE:   defb  "Enter hex for stored register values.\r\n",0   
+INCMD_MESSAGE:   defb  "IN from I/O registers; BC is register address.\r\n",0   
+OUTCMD_MESSAGE:   defb  "OUT to I/O registers; BC is register address.\r\n",0   
+MMU_MESSAGE:   defb  "Report the MMU state CBR, BBR, and CBAR ($38, $39, $3A)\r\n",0   
+bload_message:		db	"Loads a binary file into memory.\r\n",0
+bload_ready_message:	db	"\r\nReady to receive, start transfer.",0
+bdump_message:		db	"Dumps binary data from memory to serial port.\r\n",0
+bdump_ready_message:	db	"\r\nReady to send, hit any key to start.",0
+diskrd_message:		db	"Reads one sector from disk to memory.\r\n",0
+diskwr_message:		db	"Writes one sector from memory to disk.\r\n",0
+;Strings for matching:
+dump_string:		db	"dump",0
+load_string:		db	"load",0
+jump_string:		db	"jump",0
+run_string:		db	"run",0
+REGS_STRING:   defb  "regs",0   
+CALL_STRING:   defb  "call",0   
+RST_STRING:   defb  "rst",0   
+SETREGS_STRING:   defb  "setregs",0   
+INCMD_STRING:   defb  "in",0   
+OUTCMD_STRING:   defb  "out",0   
+MMU_STRING:   defb  "mmu",0   
+question_string:   defb  "?",0   
+help_string:		db	"help",0
+bload_string:		db	"bload",0
+bdump_string:		db	"bdump",0
+diskrd_string:		db	"diskrd",0
+diskwr_string:		db	"diskwr",0
+cpm_string:		db	"cpm",0
+quit_string:   defb  "quit",0   
+no_match_string:	db	0,0
+;Table for matching strings to jumps
+parse_table:
+			defw	dump_string,dump_jump,load_string,load_jump
+			defw	jump_string,run_jump,run_string,run_jump
+          defw  regs_string,regs_jump   
+          defw  call_string,call_jump   
+          defw  rst_string,rst_jump   
+          defw  setregs_string,setregs_jump   
+          defw  incmd_string,incmd_jump   
+          defw  outcmd_string,outcmd_jump   
+          defw  mmu_string,mmu_jump   
+			defw	question_string,help_jump,help_string,help_jump
+			defw	bload_string,bload_jump,bdump_string,bdump_jump
+			defw	diskrd_string,diskrd_jump,diskwr_string,diskwr_jump
+			defw	cpm_string,cpm_jump
+          defw  quit_string,quit_jump   
+			defw	no_match_string,no_match_jump
+monitor_code_end:
+;			end
+
+;JC marking end of code region
+ENDEND:
+    db $00 ; String terminator 
+
+
+.end
+
+
